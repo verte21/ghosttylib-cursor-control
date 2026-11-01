@@ -27,7 +27,7 @@ Interactive Controls:
   v                     Trigger diagonal line jump
   p                     Pause / resume cursor movement (inspect idle cycle)
   o                     Toggle stock native cursor (off)
-  Enter                 Save highlighted Shape + Effect & exit
+  Enter                 Prompt whether to override tool colors [y/N], then save & exit
   Esc / q / Ctrl+C      Revert to previous cursor & quit
 `)
 }
@@ -58,7 +58,12 @@ func main() {
 	case res.Saved && res.TurnedOff:
 		fmt.Println("✓ Custom cursor disabled -> stock native Ghostty cursor active.")
 	case res.Saved:
-		fmt.Printf("✓ Active cursor -> effect: %s | shape: %s — %s\n", res.Effect.ID, res.Shape.ID, res.Effect.Summary)
+		colorMode := "respect tool colors"
+		if res.OverrideColors {
+			colorMode = "override tool colors"
+		}
+		fmt.Printf("✓ Active cursor -> effect: %s | shape: %s (%s) — %s\n",
+			res.Effect.ID, res.Shape.ID, colorMode, res.Effect.Summary)
 	case res.Reverted:
 		fmt.Println("Reverted to previous cursor configuration.")
 	}

@@ -13,11 +13,12 @@ import (
 
 // ActiveState represents what is currently configured in configs/ghostty-cursor.conf.
 type ActiveState struct {
-	Off      bool
-	Effect   EffectID
-	Shape    ShapeID
-	Linked   bool
-	RepoRoot string
+	Off            bool
+	Effect         EffectID
+	Shape          ShapeID
+	OverrideColors bool
+	Linked         bool
+	RepoRoot       string
 }
 
 // ResolveRepoRoot locates the ghosttylib-cursor-control repository root.
@@ -55,7 +56,7 @@ func hasShadersDir(dir string) bool {
 	return err == nil && st.IsDir()
 }
 
-func ghosttyConfigPath() string {
+func ghosttyConfigPaths() []string {
 	xdg := os.Getenv("XDG_CONFIG_HOME")
 	home, _ := os.UserHomeDir()
 	xdgCfg := filepath.Join(home, ".config", "ghostty", "config")
@@ -63,14 +64,78 @@ func ghosttyConfigPath() string {
 		xdgCfg = filepath.Join(xdg, "ghostty", "config")
 	}
 	macCfg := filepath.Join(home, "Library", "Application Support", "com.mitchellh.ghostty", "config")
-	if xdg == "" {
-		if _, err := os.Stat(xdgCfg); os.IsNotExist(err) {
-			if _, err2 := os.Stat(macCfg); err2 == nil {
-				return macCfg
+	if xdg != "" {
+		return []string{xdgCfg}
+	}
+	return []string{xdgCfg, macCfg}
+}
+
+func ghosttyConfigPath() string {
+	paths := ghosttyConfigPaths()
+	if len(paths) == 2 {
+		if _, err := os.Stat(paths[0]); os.IsNotExist(err) {
+			if _, err2 := os.Stat(paths[1]); err2 == nil {
+				return paths[1]
 			}
 		}
 	}
-	return xdgCfg
+	return paths[0]
+}
+
+// ParseHexCursorColor extracts the last `cursor-color = #RRGGBB` (or RRGGBB / #RGB) value from a Ghostty config string.
+func ParseHexCursorColor(cfgText string) (r, g, b float64, ok bool) {
+	for _, rawLine := range strings.Split(cfgText, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if key != "cursor-color" {
+			continue
+		}
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.Trim(val, `"'`)
+		hex := strings.TrimPrefix(val, "#")
+		if len(hex) == 3 {
+			rv, e1 := strconv.ParseUint(strings.Repeat(hex[0:1], 2), 16, 8)
+			gv, e2 := strconv.ParseUint(strings.Repeat(hex[1:2], 2), 16, 8)
+			bv, e3 := strconv.ParseUint(strings.Repeat(hex[2:3], 2), 16, 8)
+			if e1 == nil && e2 == nil && e3 == nil {
+				r, g, b, ok = float64(rv)/255.0, float64(gv)/255.0, float64(bv)/255.0, true
+			}
+			continue
+		}
+		if len(hex) == 6 {
+			rv, e1 := strconv.ParseUint(hex[0:2], 16, 8)
+			gv, e2 := strconv.ParseUint(hex[2:4], 16, 8)
+			bv, e3 := strconv.ParseUint(hex[4:6], 16, 8)
+			if e1 == nil && e2 == nil && e3 == nil {
+				r, g, b, ok = float64(rv)/255.0, float64(gv)/255.0, float64(bv)/255.0, true
+			}
+			continue
+		}
+		// Non-hex keyword like `cell-foreground` or named X11 color resets explicit hex match
+		ok = false
+	}
+	return r, g, b, ok
+}
+
+// ReadGhosttyCursorColorRGB reads the user's Ghostty config files and returns any explicit hex `cursor-color` as normalized RGB.
+func ReadGhosttyCursorColorRGB() (r, g, b float64, ok bool) {
+	for _, p := range ghosttyConfigPaths() {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if cr, cg, cb, cok := ParseHexCursorColor(string(data)); cok {
+			r, g, b, ok = cr, cg, cb, true
+		}
+	}
+	return r, g, b, ok
 }
 
 // ReadActiveState parses configs/ghostty-cursor.conf and checks Ghostty's config link.
@@ -96,10 +161,16 @@ func ReadActiveState(repoRoot string) ActiveState {
 						st.Effect = AllEffects[FindEffectIndex(p)].ID
 					}
 				}
-				if len(parts) >= 2 {
-					s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[1]), "Shape:"))
-					if s != "" && s != "native" {
-						st.Shape = AllShapes[FindShapeIndex(s)].ID
+				for _, seg := range parts[1:] {
+					seg = strings.TrimSpace(seg)
+					if strings.HasPrefix(seg, "Shape:") {
+						s := strings.TrimSpace(strings.TrimPrefix(seg, "Shape:"))
+						if s != "" && s != "native" {
+							st.Shape = AllShapes[FindShapeIndex(s)].ID
+						}
+					} else if strings.HasPrefix(seg, "OverrideColors:") {
+						v := strings.TrimSpace(strings.TrimPrefix(seg, "OverrideColors:"))
+						st.OverrideColors = strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || v == "1"
 					}
 				}
 				break
@@ -178,8 +249,8 @@ func ShapeDECSCUSR(shape ShapeInfo, off bool) string {
 }
 
 // ApplySelection writes configs/ghostty-cursor.conf directly in <0.2ms and ensures Ghostty is linked.
-func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo) error {
-	if err := writeSnippetDirect(repoRoot, effect, shape, false); err != nil {
+func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo, overrideColors bool) error {
+	if err := writeSnippetDirect(repoRoot, effect, shape, false, overrideColors); err != nil {
 		return err
 	}
 	_ = EnsureGhosttyLinked(repoRoot)
@@ -188,7 +259,7 @@ func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo) error {
 
 // ApplyOff disables custom cursor shaders (stock native Ghostty cursor).
 func ApplyOff(repoRoot string) error {
-	return writeSnippetDirect(repoRoot, AllEffects[0], AllShapes[0], true)
+	return writeSnippetDirect(repoRoot, AllEffects[0], AllShapes[0], true, false)
 }
 
 // RestoreState restores a previously saved ActiveState back to configs/ghostty-cursor.conf.
@@ -198,7 +269,7 @@ func RestoreState(repoRoot string, st ActiveState) error {
 	}
 	eff := AllEffects[FindEffectIndex(string(st.Effect))]
 	shp := AllShapes[FindShapeIndex(string(st.Shape))]
-	return writeSnippetDirect(repoRoot, eff, shp, false)
+	return writeSnippetDirect(repoRoot, eff, shp, false, st.OverrideColors)
 }
 
 var (
@@ -222,7 +293,6 @@ func parseGhosttyPIDsFromPS(psOut string, selfPID int) []int {
 		if line == "" {
 			continue
 		}
-		// Extract field 1 (pid), field 2 (ppid), and remainder (comm path, which may contain spaces)
 		sp1 := strings.IndexAny(line, " \t")
 		if sp1 <= 0 {
 			continue
@@ -251,7 +321,6 @@ func parseGhosttyPIDsFromPS(psOut string, selfPID int) []int {
 	seen := make(map[int]bool)
 	var ordered []int
 
-	// 1. Walk ancestor chain from selfPID -> 1 first
 	cur := selfPID
 	for hops := 0; hops < 16 && cur > 1; hops++ {
 		pr, ok := procs[cur]
@@ -271,7 +340,6 @@ func parseGhosttyPIDsFromPS(psOut string, selfPID int) []int {
 		cur = pr.ppid
 	}
 
-	// 2. Include any other running Ghostty app PIDs
 	for _, pid := range allMatches {
 		if !seen[pid] {
 			seen[pid] = true
@@ -324,7 +392,17 @@ func ReloadGhostty() int {
 	return signaled
 }
 
-func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool) error {
+func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool) error {
+	var forcedRGB *[3]float64
+	if overrideColors {
+		if r, g, b, ok := ReadGhosttyCursorColorRGB(); ok {
+			forcedRGB = &[3]float64{r, g, b}
+		}
+	}
+	return writeSnippetWithColor(repoRoot, effect, shape, off, overrideColors, forcedRGB)
+}
+
+func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool, forcedRGB *[3]float64) error {
 	cfgDir := filepath.Join(repoRoot, "configs")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		return err
@@ -344,7 +422,7 @@ func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off
 	baseShader := filepath.Join(repoRoot, "shaders", effect.ShaderFile)
 	activeShader := baseShader
 	isPureHollow := shape.NativeStyle == StyleBlockHollow && !shape.BracketsSDF
-	if shape.SlashSweep || shape.BracketsSDF || isPureHollow {
+	if shape.SlashSweep || shape.BracketsSDF || isPureHollow || overrideColors {
 		slashVal := 0
 		if shape.SlashSweep {
 			slashVal = 1
@@ -366,6 +444,15 @@ func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off
 			hdr.WriteString("#undef CURSORSTYLE_BLOCK_HOLLOW\n#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)\n")
 			hdr.WriteString("#undef CURSORSTYLE_BLOCK\n#define CURSORSTYLE_BLOCK (-99)\n")
 		}
+		if overrideColors {
+			// Ignore runtime OSC 12 overrides from TUI apps (e.g. opencode2, nvim) and force Ghostty's configured cursor-color.
+			hdr.WriteString("#undef iCurrentCursorColor\n")
+			if forcedRGB != nil {
+				fmt.Fprintf(&hdr, "#define iCurrentCursorColor vec4(%.6f, %.6f, %.6f, 1.0)\n", forcedRGB[0], forcedRGB[1], forcedRGB[2])
+			} else {
+				hdr.WriteString("#define iCurrentCursorColor vec4(iCursorColor, 1.0)\n")
+			}
+		}
 		hdr.Write(rawShader)
 		if err := os.WriteFile(activeShader, []byte(hdr.String()), 0o644); err != nil {
 			return err
@@ -373,7 +460,7 @@ func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off
 	}
 
 	content := fmt.Sprintf(`# Managed by ghosttylib-cursor-control (./cursorctl)
-# Preset: %s | Shape: %s
+# Preset: %s | Shape: %s | OverrideColors: %t
 
 # Native Ghostty geometry: bar | block | underline | block_hollow
 cursor-style = %s
@@ -399,7 +486,7 @@ custom-shader-animation = true
 
 # Active cursor shader
 custom-shader = %s
-`, effect.ID, shape.ID, shape.GhosttyStyle, activeShader)
+`, effect.ID, shape.ID, overrideColors, shape.GhosttyStyle, activeShader)
 
 	return os.WriteFile(snippet, []byte(content), 0o644)
 }

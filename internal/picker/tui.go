@@ -30,6 +30,7 @@ const (
 	ansiGrnDot    = "\x1b[38;2;158;206;106m"
 	ansiSelectBg  = "\x1b[48;2;36;48;78m"
 	ansiSelectDim = "\x1b[48;2;24;30;46m"
+	ansiPromptBg  = "\x1b[48;2;30;41;68m"
 )
 
 type FocusCol int
@@ -39,13 +40,22 @@ const (
 	FocusEffects
 )
 
+type confirmPromptMode int
+
+const (
+	confirmNone confirmPromptMode = iota
+	confirmSaveExit
+	confirmSaveStay
+)
+
 // Result describes the outcome when exiting cursor-picker.
 type Result struct {
-	Saved     bool
-	TurnedOff bool
-	Reverted  bool
-	Effect    EffectInfo
-	Shape     ShapeInfo
+	Saved          bool
+	TurnedOff      bool
+	Reverted       bool
+	OverrideColors bool
+	Effect         EffectInfo
+	Shape          ShapeInfo
 }
 
 type App struct {
@@ -58,6 +68,7 @@ type App struct {
 	ghosttyConnected bool
 	stage            *LiveStage
 	statusNotice     string
+	confirmMode      confirmPromptMode
 }
 
 func NewApp(repoRoot string) *App {
@@ -249,6 +260,12 @@ func wrapPlain(text string, width int) (string, string) {
 	return l1.String(), l2.String()
 }
 
+func renderPromptBannerRow(content string, width int) string {
+	vis := VisibleLen(content)
+	pad := maxInt(0, width-vis)
+	return FitCell(ansiPromptBg+content+strings.Repeat(" ", pad)+ansiReset, width)
+}
+
 // RenderFrame builds the 3-column TUI and returns (lines, StageOrigin).
 func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 	totalW := termCols
@@ -343,11 +360,20 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 			ansiMuted, trimmedE1, ansiReset),
 		wPreview,
 	))
-	if eLine2 != "" {
+	if eLine2 != "" && a.confirmMode == confirmNone {
 		prevLines = append(prevLines, FitCell("         "+ansiMuted+eLine2+ansiReset, wPreview))
 	}
 
-	if a.stage.Paused {
+	if a.confirmMode != confirmNone {
+		p1 := fmt.Sprintf(" %s%s?%s %s%sOverride app/tool cursor colors? [y/N]%s",
+			ansiBold, ansiAmber, ansiNoBold, ansiBold, ansiText, ansiNoBold)
+		p2 := fmt.Sprintf("   %s%sy%s %sForce Ghostty%s  %s%sN/Enter%s %sKeep%s  %sEsc%s %scancel%s",
+			ansiBold, ansiGreen, ansiNoBold, ansiText, ansiMuted,
+			ansiBold, ansiCyan, ansiNoBold, ansiText, ansiMuted,
+			ansiMuted, ansiNoBold, ansiDim, ansiNoBold)
+		prevLines = append(prevLines, renderPromptBannerRow(p1, wPreview))
+		prevLines = append(prevLines, renderPromptBannerRow(p2, wPreview))
+	} else if a.stage.Paused {
 		prevLines = append(prevLines, FitCell(" "+ansiAmber+"Motion paused (idle inspection — press p to resume)"+ansiReset, wPreview))
 	} else if a.statusNotice != "" {
 		prevLines = append(prevLines, FitCell(" "+ansiGreen+a.statusNotice+ansiReset, wPreview))
@@ -398,6 +424,8 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 	savedLabel := fmt.Sprintf("%s + %s", a.savedState.Effect, a.savedState.Shape)
 	if a.savedState.Off {
 		savedLabel = "off (stock)"
+	} else if a.savedState.OverrideColors {
+		savedLabel += " [override]"
 	}
 	titleLeft := " ghosttylib-cursor-control "
 	titleRight := fmt.Sprintf(" Saved: %s ", savedLabel)
@@ -426,7 +454,7 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 		if r < len(prevLines) {
 			c3 = prevLines[r]
 		}
-		out = append(out, outerV+c1+vSep+c2+vSep+c3+outerV)
+		out = append(out, outerV+c3OrCols(c1, vSep, c2, c3)+outerV)
 	}
 
 	divBar := fmt.Sprintf("%s├%s┴%s┴%s┤%s",
@@ -438,26 +466,34 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 	)
 	out = append(out, divBar)
 
-	helpLine := fmt.Sprintf(
-		" %s←/→ Tab%s %spane%s  %s↑/↓ j/k%s %slive preview%s  %sSpace%s %sjump%s  %sw%s %sword-del%s  %sv%s %sline%s  %sp%s %spause%s  %sEnter%s %ssave & exit%s  %so%s %soff%s  %sEsc/q%s %srevert%s",
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiCyan, ansiReset, ansiDim, ansiReset,
-		ansiGreen+ansiBold, ansiReset, ansiDim, ansiReset,
-		ansiAmber, ansiReset, ansiDim, ansiReset,
-		ansiMuted, ansiReset, ansiDim, ansiReset,
-	)
+	var helpLine string
+	if a.confirmMode != confirmNone {
+		helpLine = fmt.Sprintf(
+			" %s%sOverride app/tool colors (opencode, nvim)? [y/N]%s  %s%sy%s %sYes%s  %s%sN/Enter%s %sNo%s  %sEsc%s %scancel%s",
+			ansiAmber, ansiBold, ansiReset,
+			ansiGreen, ansiBold, ansiReset, ansiText, ansiReset,
+			ansiCyan, ansiBold, ansiReset, ansiText, ansiReset,
+			ansiMuted, ansiReset, ansiDim, ansiReset,
+		)
+	} else {
+		helpLine = fmt.Sprintf(
+			" %s←/→ Tab%s %spane%s  %s↑/↓ j/k%s %slive preview%s  %sSpace%s %sjump%s  %sw%s %sword-del%s  %sv%s %sline%s  %sp%s %spause%s  %sEnter%s %ssave & exit%s  %so%s %soff%s  %sEsc/q%s %srevert%s",
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiCyan, ansiReset, ansiDim, ansiReset,
+			ansiGreen+ansiBold, ansiReset, ansiDim, ansiReset,
+			ansiAmber, ansiReset, ansiDim, ansiReset,
+			ansiMuted, ansiReset, ansiDim, ansiReset,
+		)
+	}
 	out = append(out, outerV+FitCell(helpLine, totalW-2)+outerV)
 
 	botBar := fmt.Sprintf("%s╰%s╯%s", ansiBorderAct, strings.Repeat("─", totalW-2), ansiReset)
 	out = append(out, botBar)
 
-	// 1-based screen coordinates of preview.go row 0, col 0:
-	// Row 1 = topBar, Row 2 = LIVE GHOSTTY STAGE header, Row 3 = preview.go top border, Row 4 = editor row 0!
-	// Col = 1 (outerV) + wShapes + 1 (vSep) + wEffects + 1 (vSep) + padL + 1 (winBorder) + 1 (1-based) = 5 + wShapes + wEffects + padL
 	origin := StageOrigin{
 		TopRow:  4,
 		LeftCol: 5 + wShapes + wEffects + padL,
@@ -465,6 +501,10 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 		Rows:    edRows,
 	}
 	return out, origin
+}
+
+func c3OrCols(c1, vSep, c2, c3 string) string {
+	return c1 + vSep + c2 + vSep + c3
 }
 
 func maxInt(a, b int) int {
@@ -533,7 +573,6 @@ func RunInteractive(repoRoot string) (Result, error) {
 	initSeq := ShapeDECSCUSR(AllShapes[app.shapeIdx], app.previewOff)
 	_, _ = io.WriteString(os.Stdout, "\x1b[?1049h"+initSeq+"\x1b[?25h\x1b[2J\x1b[H")
 	cleanup := func() {
-		// Exit alternate screen AND apply the final chosen/reverted DECSCUSR style to the main shell screen!
 		_, _ = io.WriteString(os.Stdout, "\x1b[?2026l\x1b[0m\x1b[?1049l"+exitDECSCUSR+"\x1b[?25h")
 		RestoreTerm(inFD, oldState)
 	}
@@ -561,7 +600,6 @@ func RunInteractive(repoRoot string) (Result, error) {
 	var currentOrigin StageOrigin
 	needClear := true
 
-	// Full UI draw (only runs on keypress or resize — NEVER on idle frames so Ghostty's cursor stays undisturbed!)
 	drawUI := func() {
 		cols, rows := GetTermSize(outFD)
 		lines, origin := app.RenderFrame(cols, rows)
@@ -581,15 +619,12 @@ func RunInteractive(repoRoot string) (Result, error) {
 		for i := 0; i < maxLines; i++ {
 			fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[2K%s", i+1, lines[i])
 		}
-		// Immediately apply the selected shape's DECSCUSR geometry (\x1b[6 q / \x1b[4 q / \x1b[2 q)
-		// and park Ghostty's REAL GPU cursor right on the Live Stage!
 		frame.WriteString(ShapeDECSCUSR(AllShapes[app.shapeIdx], app.previewOff))
 		sr, sc := origin.ScreenPos(app.stage.CurRow, app.stage.CurCol)
 		fmt.Fprintf(&frame, "\x1b[%d;%dH\x1b[?2026l", sr, sc)
 		_, _ = io.WriteString(os.Stdout, frame.String())
 	}
 
-	// Timers for debounced live Ghostty shader reload (SIGUSR2) and surgical stage steps
 	reloadTimer := time.NewTimer(time.Hour)
 	reloadTimer.Stop()
 	defer reloadTimer.Stop()
@@ -617,6 +652,37 @@ func RunInteractive(repoRoot string) (Result, error) {
 		resetTimer(reloadTimer, 35*time.Millisecond)
 	}
 
+	commitSave := func(overrideColors bool, exitAfter bool) (Result, bool, error) {
+		eff := AllEffects[app.effectIdx]
+		shp := AllShapes[app.shapeIdx]
+		if err := ApplySelection(app.repoRoot, eff, shp, overrideColors); err != nil {
+			return Result{}, false, err
+		}
+		ReloadGhostty()
+		exitDECSCUSR = ShapeDECSCUSR(shp, false)
+		app.savedState.Off = false
+		app.savedState.Effect = eff.ID
+		app.savedState.Shape = shp.ID
+		app.savedState.OverrideColors = overrideColors
+		app.confirmMode = confirmNone
+		if exitAfter {
+			return Result{
+				Saved:          true,
+				OverrideColors: overrideColors,
+				Effect:         eff,
+				Shape:          shp,
+			}, true, nil
+		}
+		modeLabel := "keep tool colors"
+		if overrideColors {
+			modeLabel = "override tool colors"
+		}
+		app.statusNotice = fmt.Sprintf("Saved: %s + %s (%s)", eff.ID, shp.ID, modeLabel)
+		needClear = true
+		drawUI()
+		return Result{}, false, nil
+	}
+
 	drawUI()
 	scheduleLiveReload()
 
@@ -627,19 +693,16 @@ func RunInteractive(repoRoot string) (Result, error) {
 			drawUI()
 
 		case <-reloadTimer.C:
-			// Hot-load the highlighted Effect x Shape directly into Ghostty via SIGUSR2!
 			if app.previewOff {
 				_ = ApplyOff(app.repoRoot)
 			} else {
-				_ = ApplySelection(app.repoRoot, AllEffects[app.effectIdx], AllShapes[app.shapeIdx])
+				_ = ApplySelection(app.repoRoot, AllEffects[app.effectIdx], AllShapes[app.shapeIdx], app.savedState.OverrideColors)
 			}
 			signaled := ReloadGhostty()
 			if signaled > 0 != app.ghosttyConnected {
 				app.ghosttyConnected = signaled > 0
 				drawUI()
 			}
-			// Wait 120ms for Ghostty + Metal to compile the newly reloaded GLSL shader,
-			// then fire the pre-staged signature cursor move on preview.go!
 			resetTimer(stepTimer, 120*time.Millisecond)
 
 		case <-stepTimer.C:
@@ -655,6 +718,40 @@ func RunInteractive(repoRoot string) (Result, error) {
 				ReloadGhostty()
 				return Result{Reverted: true}, nil
 			}
+
+			// Handle [y/N] confirmation prompt when saving!
+			if app.confirmMode != confirmNone {
+				exitAfter := app.confirmMode == confirmSaveExit
+				switch rawKey {
+				case "\x03": // Ctrl+C still reverts & exits immediately
+					_ = RestoreState(app.repoRoot, app.savedState)
+					ReloadGhostty()
+					exitDECSCUSR = ShapeDECSCUSR(AllShapes[FindShapeIndex(string(app.savedState.Shape))], app.savedState.Off)
+					return Result{Reverted: true}, nil
+				case "\x1b", "q", "Q": // Esc / q cancels the prompt and returns to browsing
+					app.confirmMode = confirmNone
+					needClear = true
+					drawUI()
+				case "y", "Y": // Yes: force Ghostty cursor-color over app/tool OSC 12 colors
+					res, done, err := commitSave(true, exitAfter)
+					if err != nil {
+						return Result{}, err
+					}
+					if done {
+						return res, nil
+					}
+				case "n", "N", "\r", "\n": // No (default): respect app/tool OSC 12 colors
+					res, done, err := commitSave(false, exitAfter)
+					if err != nil {
+						return Result{}, err
+					}
+					if done {
+						return res, nil
+					}
+				}
+				continue
+			}
+
 			switch rawKey {
 			case "\x03", "q", "Q", "\x1b": // Revert to savedState & quit!
 				_ = RestoreState(app.repoRoot, app.savedState)
@@ -733,20 +830,15 @@ func RunInteractive(repoRoot string) (Result, error) {
 					app.savedState.Off = true
 					exitDECSCUSR = ShapeDECSCUSR(AllShapes[0], true)
 					app.statusNotice = "Saved: off (stock Ghostty cursor)"
+					ReloadGhostty()
+					drawUI()
 				} else {
-					eff := AllEffects[app.effectIdx]
-					shp := AllShapes[app.shapeIdx]
-					_ = ApplySelection(app.repoRoot, eff, shp)
-					app.savedState.Off = false
-					app.savedState.Effect = eff.ID
-					app.savedState.Shape = shp.ID
-					exitDECSCUSR = ShapeDECSCUSR(shp, false)
-					app.statusNotice = fmt.Sprintf("Saved baseline: %s + %s", eff.ID, shp.ID)
+					app.confirmMode = confirmSaveStay
+					needClear = true
+					drawUI()
 				}
-				ReloadGhostty()
-				drawUI()
 
-			case "\r", "\n": // Save selection & exit (already live in Ghostty!)
+			case "\r", "\n": // Ask tool-color override [y/N], then save & exit!
 				if app.previewOff {
 					if err := ApplyOff(app.repoRoot); err != nil {
 						return Result{}, err
@@ -755,18 +847,9 @@ func RunInteractive(repoRoot string) (Result, error) {
 					exitDECSCUSR = ShapeDECSCUSR(AllShapes[0], true)
 					return Result{Saved: true, TurnedOff: true}, nil
 				}
-				eff := AllEffects[app.effectIdx]
-				shp := AllShapes[app.shapeIdx]
-				if err := ApplySelection(app.repoRoot, eff, shp); err != nil {
-					return Result{}, err
-				}
-				ReloadGhostty()
-				exitDECSCUSR = ShapeDECSCUSR(shp, false)
-				return Result{
-					Saved:  true,
-					Effect: eff,
-					Shape:  shp,
-				}, nil
+				app.confirmMode = confirmSaveExit
+				needClear = true
+				drawUI()
 			}
 		}
 	}

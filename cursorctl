@@ -224,7 +224,7 @@ current_preset() {
 current_shape() {
   if [[ -f "$SNIPPET_FILE" ]]; then
     local s
-    s="$(awk -F'Shape:[[:space:]]*' '/^# Preset:.*Shape:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$SNIPPET_FILE")"
+    s="$(awk -F'Shape:[[:space:]]*' '/^# Preset:.*Shape:/ { sub(/\|.*/, "", $2); gsub(/[[:space:]]/, "", $2); print $2; exit }' "$SNIPPET_FILE")"
     if [[ -n "$s" && "$s" != "native" ]]; then
       normalize_shape "$s"
       return
@@ -236,6 +236,54 @@ current_shape() {
     fi
   fi
   echo "slash"
+}
+
+current_override_colors() {
+  if [[ -f "$SNIPPET_FILE" ]]; then
+    local v
+    v="$(awk -F'OverrideColors:[[:space:]]*' '/^# Preset:.*OverrideColors:/ { sub(/\|.*/, "", $2); gsub(/[[:space:]]/, "", $2); print tolower($2); exit }' "$SNIPPET_FILE")"
+    if [[ "$v" == "true" || "$v" == "yes" || "$v" == "1" ]]; then
+      echo "true"
+      return
+    fi
+  fi
+  echo "false"
+}
+
+ghostty_color_vec4_macro() {
+  local hex=""
+  local cfgs=("$XDG_GHOSTTY_CONFIG")
+  if [[ -z "${XDG_CONFIG_HOME:-}" ]]; then
+    cfgs+=("$MACOS_GHOSTTY_CONFIG")
+  fi
+  for cfg in "${cfgs[@]}"; do
+    if [[ -r "$cfg" ]]; then
+      local found
+      found="$(awk -F'=' '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*cursor-color[[:space:]]*=/ {
+          val = $2
+          gsub(/^[[:space:]"'\''#]+|[[:space:]"'\'']+$/, "", val)
+          if (val ~ /^[0-9A-Fa-f]{6}$/) { h = val }
+          else if (val ~ /^[0-9A-Fa-f]{3}$/) {
+            h = substr(val,1,1) substr(val,1,1) substr(val,2,1) substr(val,2,1) substr(val,3,1) substr(val,3,1)
+          } else { h = "" }
+        }
+        END { if (h != "") print h }
+      ' "$cfg")"
+      if [[ -n "$found" ]]; then
+        hex="$found"
+      fi
+    fi
+  done
+  if [[ -n "$hex" ]]; then
+    local r=$(( 16#${hex:0:2} ))
+    local g=$(( 16#${hex:2:2} ))
+    local b=$(( 16#${hex:4:2} ))
+    awk -v r="$r" -v g="$g" -v b="$b" 'BEGIN { printf "vec4(%.6f, %.6f, %.6f, 1.0)", r/255.0, g/255.0, b/255.0 }'
+  else
+    echo "vec4(iCursorColor, 1.0)"
+  fi
 }
 
 write_off_snippet() {
@@ -281,12 +329,13 @@ write_snippet() {
   pure_hollow="$(is_pure_hollow_shape "$logical_shape")"
   local base_shader
   base_shader="$(resolve_shader "$preset")"
+  local override_colors="${3:-$(current_override_colors)}"
 
   mkdir -p "$CONFIGS_DIR"
   rm -f "$CONFIGS_DIR"/.slash-*.glsl "$CONFIGS_DIR"/.gen-*.glsl
 
   local active_shader="$base_shader"
-  if [[ "$slash_mode" == "1" || "$brackets_mode" == "1" || "$pure_hollow" == "1" ]]; then
+  if [[ "$slash_mode" == "1" || "$brackets_mode" == "1" || "$pure_hollow" == "1" || "$override_colors" == "true" ]]; then
     active_shader="$CONFIGS_DIR/.gen-${preset}-${logical_shape}.glsl"
     {
       echo "#define SLASH_SWEEP_MODE $slash_mode"
@@ -297,13 +346,17 @@ write_snippet() {
         echo "#undef CURSORSTYLE_BLOCK"
         echo "#define CURSORSTYLE_BLOCK (-99)"
       fi
+      if [[ "$override_colors" == "true" ]]; then
+        echo "#undef iCurrentCursorColor"
+        echo "#define iCurrentCursorColor $(ghostty_color_vec4_macro)"
+      fi
       cat "$base_shader"
     } > "$active_shader"
   fi
 
   cat > "$SNIPPET_FILE" <<EOF
 # Managed by ghosttylib-cursor-control (./cursorctl)
-# Preset: $preset | Shape: $logical_shape
+# Preset: $preset | Shape: $logical_shape | OverrideColors: $override_colors
 
 # Native Ghostty geometry: bar | block | underline | block_hollow
 cursor-style = $ghostty_style
@@ -363,7 +416,7 @@ configure_ghostty() {
 
 reload_ghostty() {
   local target_shape="${1:-}"
-  ps -axo pid=,comm= 2>/dev/null | awk -v self="$$" '
+  { ps -axo pid=,comm= 2>/dev/null || true; } | awk -v self="$$" '
     {
       pid = $1
       sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)

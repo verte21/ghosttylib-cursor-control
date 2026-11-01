@@ -40,7 +40,7 @@ Instead of approximating shaders with ASCII or block characters, `cursor-picker`
 | `p` | Pause / resume stage motion (inspect pure resting shape & idle pulse) |
 | `o` | Toggle stock native Ghostty cursor (`off`) live |
 | `a` | Save current combo as baseline **without** closing the picker |
-| `Enter` | Save selected cursor & exit |
+| `Enter` | Prompt whether to override app/tool colors (`[y/N]`), then save & exit |
 | `Esc` / `q` / `Ctrl+C` | Revert to previous saved cursor & quit |
 
 ```bash
@@ -114,6 +114,7 @@ Effects and cursor shapes are completely independent — swap both together, or 
 ## Architecture & Compatibility Details
 
 - **True Orthogonality (`Shapes × Effects`)**: Every shader evaluates geometry via a unified `cursorShapeSDF` and derives motion/physics scales from true character-cell metrics (`estimateCellHeight` / `estimateCellWidth`) rather than raw cursor thickness — so `underscore` (`2px` height), `hollow`, and `brackets` (`[ ]`) behave accurately across every effect.
+- **Optional `OSC 12` App/Tool Color Override**: Full-screen TUIs (`opencode`, `nvim`, etc.) often emit runtime `OSC 12` sequences that overwrite `iCurrentCursorColor`. Pressing `Enter` (or `a`) in `cursor-picker` prompts `[y/N]` whether to force Ghostty's configured `cursor-color` across all tools or keep each app's own cursor palette.
 - **Readable Characters Under `block` Cursors**: Combines Ghostty's `cursor-text = cell-foreground` with local corner background sampling (`shadeBlockText`), keeping text under `block` and `slash-block` cursors sharp even inside custom-colored TUI panels.
 - **macOS `Cmd + Z` / `Cmd + Shift + Z` TUI Pass-Through**: Unbinds Ghostty's default macOS `super+z=undo` and `super+shift+z=redo` menu shortcuts in `configs/ghostty-cursor.conf` so Kitty-keyboard-protocol TUIs receive `Cmd + Z` undo events directly (`Cmd + Shift + T` still reopens closed tabs).
 - **Zero Unfocused GPU Overhead**: Uses `custom-shader-animation = true` so Ghostty stops animating when unfocused, rendering a clean static outline (`renderUnfocusedCursor`) and native password lock icon (`renderLockCursor`).

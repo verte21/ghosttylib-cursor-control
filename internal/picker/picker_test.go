@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,31 +21,41 @@ func TestTUIFrameExactColumnAlignmentAndStageCoordinates(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tmp, "configs"), 0o755)
 
 	app := NewApp(tmp)
-	for _, size := range [][2]int{{86, 24}, {100, 26}, {116, 30}, {132, 40}} {
-		lines, origin := app.RenderFrame(size[0], size[1])
-		if len(lines) == 0 {
-			t.Fatalf("empty frame at %v", size)
-		}
-		wantW := VisibleLen(lines[0])
-		for idx, ln := range lines {
-			gotW := VisibleLen(ln)
-			if gotW != wantW {
-				t.Fatalf("size %v line %d visible width mismatch: got %d, want %d\nline=%q", size, idx, gotW, wantW, ln)
+	for _, confirm := range []confirmPromptMode{confirmNone, confirmSaveExit} {
+		app.confirmMode = confirm
+		for _, size := range [][2]int{{86, 24}, {100, 26}, {116, 30}, {132, 40}} {
+			lines, origin := app.RenderFrame(size[0], size[1])
+			if len(lines) == 0 {
+				t.Fatalf("empty frame at %v", size)
 			}
-		}
+			wantW := VisibleLen(lines[0])
+			for idx, ln := range lines {
+				gotW := VisibleLen(ln)
+				if gotW != wantW {
+					t.Fatalf("confirm=%v size %v line %d visible width mismatch: got %d, want %d\nline=%q", confirm, size, idx, gotW, wantW, ln)
+				}
+			}
 
-		// Verify 1-based StageOrigin lands on the EXACT characters inside preview.go!
-		line0Runes := []rune(stripANSI(lines[origin.TopRow-1+0]))
-		if got := line0Runes[origin.LeftCol-1+1]; got != '1' {
-			t.Fatalf("size %v expected line number '1' at stage (0,1), got %q", size, got)
-		}
-		line3Runes := []rune(stripANSI(lines[origin.TopRow-1+3]))
-		if got := line3Runes[origin.LeftCol-1+8]; got != 'b' {
-			t.Fatalf("size %v expected 'b' of blade at stage (3,8), got %q", size, got)
-		}
-		line4Runes := []rune(stripANSI(lines[origin.TopRow-1+4]))
-		if got := line4Runes[origin.LeftCol-1+15]; got != 'B' {
-			t.Fatalf("size %v expected 'B' of Blend at stage (4,15), got %q", size, got)
+			// Verify 1-based StageOrigin lands on the EXACT characters inside preview.go!
+			line0Runes := []rune(stripANSI(lines[origin.TopRow-1+0]))
+			if got := line0Runes[origin.LeftCol-1+1]; got != '1' {
+				t.Fatalf("size %v expected line number '1' at stage (0,1), got %q", size, got)
+			}
+			line3Runes := []rune(stripANSI(lines[origin.TopRow-1+3]))
+			if got := line3Runes[origin.LeftCol-1+8]; got != 'b' {
+				t.Fatalf("size %v expected 'b' of blade at stage (3,8), got %q", size, got)
+			}
+			line4Runes := []rune(stripANSI(lines[origin.TopRow-1+4]))
+			if got := line4Runes[origin.LeftCol-1+15]; got != 'B' {
+				t.Fatalf("size %v expected 'B' of Blend at stage (4,15), got %q", size, got)
+			}
+
+			if confirm == confirmSaveExit {
+				joined := stripANSI(strings.Join(lines, "\n"))
+				if !strings.Contains(joined, "Override app/tool cursor colors? [y/N]") || !strings.Contains(joined, "Override app/tool colors (opencode, nvim)? [y/N]") {
+					t.Fatalf("size %v missing [y/N] prompt in rendered frame:\n%s", size, joined)
+				}
+			}
 		}
 	}
 }
@@ -78,7 +89,7 @@ func TestStageSurgicalWordDeleteAndTyping(t *testing.T) {
 	}
 }
 
-func TestConfigApplyHollowMacrosAndRestore(t *testing.T) {
+func TestConfigApplyHollowAndOverrideColorsMacrosAndRestore(t *testing.T) {
 	tmp := t.TempDir()
 	shadersDir := filepath.Join(tmp, "shaders")
 	if err := os.MkdirAll(shadersDir, 0o755); err != nil {
@@ -90,25 +101,54 @@ func TestConfigApplyHollowMacrosAndRestore(t *testing.T) {
 		}
 	}
 
-	// Start with neon + bar
-	if err := writeSnippetDirect(tmp, AllEffects[FindEffectIndex("neon")], AllShapes[FindShapeIndex("bar")], false); err != nil {
+	// Test hex cursor-color parser (#39ff14 neon green)
+	r, g, b, ok := ParseHexCursorColor("# comment\nfont-size = 14\ncursor-color = #39ff14\n")
+	if !ok || math.Abs(r-57.0/255.0) > 1e-4 || math.Abs(g-1.0) > 1e-4 || math.Abs(b-20.0/255.0) > 1e-4 {
+		t.Fatalf("unexpected parsed RGB: (%v, %v, %v, %v)", r, g, b, ok)
+	}
+
+	// Start with neon + bar + overrideColors=true (explicit #39ff14)
+	rgb := [3]float64{r, g, b}
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("neon")], AllShapes[FindShapeIndex("bar")], false, true, &rgb); err != nil {
 		t.Fatal(err)
 	}
 	saved := ReadActiveState(tmp)
-	if saved.Effect != EffectNeon || saved.Shape != ShapeBar {
+	if saved.Effect != EffectNeon || saved.Shape != ShapeBar || !saved.OverrideColors {
 		t.Fatalf("unexpected saved state: %+v", saved)
 	}
+	genBar, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-neon-bar.glsl"))
+	if err != nil {
+		t.Fatalf("expected .gen-neon-bar.glsl when overrideColors=true: %v", err)
+	}
+	if !strings.Contains(string(genBar), "#define iCurrentCursorColor vec4(0.223529, 1.000000, 0.078431, 1.0)") {
+		t.Fatalf("missing forced RGB macro in generated shader: %s", string(genBar))
+	}
 
-	// Switch to liquid + hollow and verify generated shader defines CURSORSTYLE_BLOCK_HOLLOW macro
-	if err := writeSnippetDirect(tmp, AllEffects[FindEffectIndex("liquid")], AllShapes[FindShapeIndex("hollow")], false); err != nil {
+	// Fallback when no hex cursor-color is set (theme color via iCursorColor)
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("katana")], AllShapes[FindShapeIndex("bar")], false, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	genData, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-liquid-hollow.glsl"))
+	genTheme, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-katana-bar.glsl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(genTheme), "#define iCurrentCursorColor vec4(iCursorColor, 1.0)") {
+		t.Fatalf("missing fallback iCursorColor macro: %s", string(genTheme))
+	}
+
+	// Switch to liquid + hollow (overrideColors=false) and verify hollow macro without color override
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("liquid")], AllShapes[FindShapeIndex("hollow")], false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	genHollow, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-liquid-hollow.glsl"))
 	if err != nil {
 		t.Fatalf("expected .gen-liquid-hollow.glsl: %v", err)
 	}
-	if !strings.Contains(string(genData), "#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)") {
-		t.Fatalf("missing hollow runtime macro in generated shader: %s", string(genData))
+	if !strings.Contains(string(genHollow), "#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)") {
+		t.Fatalf("missing hollow runtime macro in generated shader: %s", string(genHollow))
+	}
+	if strings.Contains(string(genHollow), "#define iCurrentCursorColor") {
+		t.Fatalf("unexpected color override macro when overrideColors=false: %s", string(genHollow))
 	}
 
 	// Verify ShapeDECSCUSR mappings
@@ -122,12 +162,12 @@ func TestConfigApplyHollowMacrosAndRestore(t *testing.T) {
 		t.Fatalf("expected \\x1b[2 q for hollow, got %q", got)
 	}
 
-	// Revert to saved (neon + bar)
+	// Revert to saved (neon + bar + OverrideColors=true)
 	if err := RestoreState(tmp, saved); err != nil {
 		t.Fatal(err)
 	}
 	reverted := ReadActiveState(tmp)
-	if reverted.Effect != EffectNeon || reverted.Shape != ShapeBar || reverted.Off {
+	if reverted.Effect != EffectNeon || reverted.Shape != ShapeBar || !reverted.OverrideColors || reverted.Off {
 		t.Fatalf("unexpected reverted state: %+v", reverted)
 	}
 }

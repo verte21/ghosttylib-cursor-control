@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHADERS_DIR="$REPO_DIR/shaders"
+CONFIGS_DIR="$REPO_DIR/configs"
+SNIPPET_FILE="$CONFIGS_DIR/ghostty-cursor.conf"
+XDG_GHOSTTY_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ghostty/config"
+MACOS_GHOSTTY_CONFIG="$HOME/Library/Application Support/com.mitchellh.ghostty/config"
+if [[ -z "${XDG_CONFIG_HOME:-}" && ! -f "$XDG_GHOSTTY_CONFIG" && -f "$MACOS_GHOSTTY_CONFIG" ]]; then
+  GHOSTTY_CONFIG="$MACOS_GHOSTTY_CONFIG"
+else
+  GHOSTTY_CONFIG="$XDG_GHOSTTY_CONFIG"
+fi
+INCLUDE_LINE="config-file = ?$SNIPPET_FILE"
+
+ALL_PRESETS=(
+  katana
+  expand
+  neon
+  jelly
+  prism
+  hud
+  ripple
+  liquid
+  heartbeat
+  smooth
+)
+
+ALL_SHAPES=(
+  slash
+  bar
+  block
+  slash-block
+  underscore
+  hollow
+  slash-hollow
+  brackets
+  slash-brackets
+)
+
+usage() {
+  cat <<'EOF'
+ghosttylib-cursor-control — GPU-accelerated orthogonal cursor shapes & effects for Ghostty
+
+Usage:
+  ./cursorctl [pick|ui]                  Launch interactive Go TUI picker with live preview
+  ./cursor-picker                        Launch interactive Go TUI picker directly
+  ./cursorctl set <effect> [shape]       Mix any effect with any cursor shape
+  ./cursorctl shape <shape>              Switch cursor shape only (keeps current effect)
+  ./cursorctl next [shape]               Cycle to the next effect (keeps current shape)
+  ./cursorctl prev [shape]               Cycle to the previous effect (keeps current shape)
+  ./cursorctl off                        Temporarily revert to stock native cursor
+  ./cursorctl list                       List all 10 effects & 9 shapes (* marks active)
+  ./cursorctl status                     Show current Ghostty cursor status
+  ./cursorctl install [effect] [shape]   Link cursor snippet into Ghostty config
+  ./cursorctl uninstall                  Remove Ghostty cursor setup completely
+
+Effects (100% independent of cursor shape):
+  katana         Horizontal word-delete execution slash + curved line-jump arc
+  expand         VS Code symmetric center expand + smooth 85ms caret glide
+  neon           Cyberpunk HDR neon bloom aura + keystroke spark
+  jelly          Pixel-clamped bounce spring + shape-preserving squash & stretch
+  prism          Chromatic RGB dispersion on movement + iridescent shimmer
+  hud            Tactical target-lock reticle + converging rangefinder ticks + holo scanbeam
+  ripple         Sonic shockwave ring + liquid-glass jump refraction
+  liquid         Continuous liquid meniscus ribbon + lens refraction + slosh
+  heartbeat      Steady cursor size + subtle twin-beat ("lub-dub") edge lighting
+  smooth         Silky cosine-wave opacity fade without size change
+
+Cursor Shapes (mix freely with EVERY effect):
+  slash          Thin vertical blade sweeping BOTTOM-TO-TOP (aliases: sweep, up)
+  bar            Thin vertical line (aliases: line, beam)
+  block          Full-cell solid block (preserves crisp glyph legibility)
+  slash-block    Full-cell solid block sweeping BOTTOM-TO-TOP
+  underscore     Horizontal bottom underscore (alias: underline)
+  hollow         1.5px full-cell outline box (alias: block_hollow)
+  slash-hollow   1.5px outline box sweeping BOTTOM-TO-TOP
+  brackets       4-corner [ ] caliper reticle (alias: calipers)
+  slash-brackets 4-corner [ ] caliper reticle sweeping BOTTOM-TO-TOP
+EOF
+}
+
+preset_description() {
+  case "$1" in
+    katana)    echo "Horizontal word-delete slash + curved line-jump arc" ;;
+    expand)    echo "VS Code symmetric center expand + smooth 85ms caret glide" ;;
+    neon)      echo "HDR neon bloom halo + keystroke spark + glide" ;;
+    jelly)     echo "Pixel-clamped bounce spring + squash & stretch" ;;
+    prism)     echo "RGB chromatic split on movement + iridescent shimmer" ;;
+    hud)       echo "Tactical target-lock reticle + converging rangefinder ticks + holo scanbeam" ;;
+    ripple)    echo "Sonic shockwave ring + liquid-glass jump refraction" ;;
+    liquid)    echo "Continuous liquid meniscus ribbon + lens refraction + slosh" ;;
+    heartbeat) echo "Steady-size cursor + subtle twin-beat ('lub-dub') lighting" ;;
+    smooth)    echo "Silky cosine-wave opacity fade without size change" ;;
+  esac
+}
+
+shape_description() {
+  case "$1" in
+    slash)          echo "Vertical bar sweeping bottom-to-top (aliases: sweep, up)" ;;
+    bar)            echo "Vertical bar (aliases: line, beam)" ;;
+    block)          echo "Full-cell solid block (high-contrast text preserved)" ;;
+    slash-block)    echo "Full-cell solid block sweeping bottom-to-top" ;;
+    underscore)     echo "Bottom horizontal underscore (alias: underline)" ;;
+    hollow)         echo "1.5px hollow outline box (alias: block_hollow)" ;;
+    slash-hollow)   echo "1.5px hollow outline box sweeping bottom-to-top" ;;
+    brackets)       echo "4-corner [ ] caliper reticle (alias: calipers)" ;;
+    slash-brackets) echo "4-corner [ ] caliper reticle sweeping bottom-to-top" ;;
+  esac
+}
+
+normalize_preset() {
+  case "$1" in
+    katana-down|katana-up)                     echo "katana" ;;
+    expand-glide|expand-trail|top-down|bottom-up) echo "expand" ;;
+    brackets|recoil)                           echo "hud" ;;
+    phase)                                     echo "smooth" ;;
+    *)                                         echo "$1" ;;
+  esac
+}
+
+normalize_shape() {
+  case "$1" in
+    slash|sweep|up|bottom-up|bottom-to-top) echo "slash" ;;
+    bar|line|beam)                          echo "bar" ;;
+    block)                                  echo "block" ;;
+    slash-block|block-slash)                echo "slash-block" ;;
+    underscore|underline)                   echo "underscore" ;;
+    hollow|block_hollow)                    echo "hollow" ;;
+    slash-hollow|hollow-slash)              echo "slash-hollow" ;;
+    brackets|calipers|reticle)              echo "brackets" ;;
+    slash-brackets|brackets-slash)          echo "slash-brackets" ;;
+    *)
+      echo "Error: unknown shape '$1' (expected: slash, bar, block, slash-block, underscore, hollow, slash-hollow, brackets, slash-brackets)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+ghostty_cursor_style() {
+  case "$1" in
+    slash|bar)                                   echo "bar" ;;
+    block|slash-block)                           echo "block" ;;
+    underscore)                                  echo "underline" ;;
+    hollow|slash-hollow|brackets|slash-brackets) echo "block_hollow" ;;
+  esac
+}
+
+is_slash_sweep_shape() {
+  case "$1" in
+    slash|slash-block|slash-hollow|slash-brackets) echo "1" ;;
+    *)                                             echo "0" ;;
+  esac
+}
+
+is_brackets_shape() {
+  case "$1" in
+    brackets|slash-brackets) echo "1" ;;
+    *)                       echo "0" ;;
+  esac
+}
+
+is_pure_hollow_shape() {
+  case "$1" in
+    hollow|slash-hollow) echo "1" ;;
+    *)                   echo "0" ;;
+  esac
+}
+
+emit_shape_decscusr() {
+  if [[ ! -t 1 ]]; then
+    return
+  fi
+  case "${1:-off}" in
+    off|native)      printf '\033[0 q' ;;
+    slash|bar)       printf '\033[6 q' ;;
+    underscore)      printf '\033[4 q' ;;
+    *)               printf '\033[2 q' ;;
+  esac
+}
+
+resolve_shader() {
+  local preset
+  preset="$(normalize_preset "$1")"
+  case "$preset" in
+    katana)    echo "$SHADERS_DIR/katana-slash.glsl" ;;
+    expand)    echo "$SHADERS_DIR/vscode-expand.glsl" ;;
+    neon)      echo "$SHADERS_DIR/neon-expand.glsl" ;;
+    jelly)     echo "$SHADERS_DIR/elastic-jelly.glsl" ;;
+    prism)     echo "$SHADERS_DIR/chromatic-prism.glsl" ;;
+    hud)       echo "$SHADERS_DIR/cyber-brackets.glsl" ;;
+    ripple)    echo "$SHADERS_DIR/sonic-ripple.glsl" ;;
+    liquid)    echo "$SHADERS_DIR/liquid-drop.glsl" ;;
+    heartbeat) echo "$SHADERS_DIR/heartbeat.glsl" ;;
+    smooth)    echo "$SHADERS_DIR/vscode-smooth.glsl" ;;
+    *)
+      echo "Error: unknown effect '$1' (run './cursorctl list' to see all effects & shapes)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+raw_preset() {
+  if [[ -f "$SNIPPET_FILE" ]]; then
+    local raw
+    raw="$(awk '/^# Preset:/ { print $3; exit }' "$SNIPPET_FILE")"
+    echo "${raw:-katana}"
+  else
+    echo "katana"
+  fi
+}
+
+current_preset() {
+  local raw
+  raw="$(raw_preset)"
+  if [[ "$raw" == "off" ]]; then
+    echo "katana"
+  else
+    normalize_preset "$raw"
+  fi
+}
+
+current_shape() {
+  if [[ -f "$SNIPPET_FILE" ]]; then
+    local s
+    s="$(awk -F'Shape:[[:space:]]*' '/^# Preset:.*Shape:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$SNIPPET_FILE")"
+    if [[ -n "$s" && "$s" != "native" ]]; then
+      normalize_shape "$s"
+      return
+    fi
+    s="$(awk -F'=' '/^cursor-style[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$SNIPPET_FILE")"
+    if [[ -n "$s" ]]; then
+      normalize_shape "$s"
+      return
+    fi
+  fi
+  echo "slash"
+}
+
+write_off_snippet() {
+  mkdir -p "$CONFIGS_DIR"
+  rm -f "$CONFIGS_DIR"/.slash-*.glsl "$CONFIGS_DIR"/.gen-*.glsl
+  cat > "$SNIPPET_FILE" <<'EOF'
+# Managed by ghosttylib-cursor-control (./cursorctl)
+# Preset: off | Shape: native
+EOF
+  if command -v ghostty >/dev/null 2>&1; then
+    ghostty +validate-config --config-file="$SNIPPET_FILE" >/dev/null
+  fi
+}
+
+cycle_preset() {
+  local delta="$1"
+  local cur
+  cur="$(current_preset)"
+  local count="${#ALL_PRESETS[@]}"
+  local idx=0
+  for i in "${!ALL_PRESETS[@]}"; do
+    if [[ "${ALL_PRESETS[$i]}" == "$cur" ]]; then
+      idx="$i"
+      break
+    fi
+  done
+  local next_idx=$(( (idx + delta + count) % count ))
+  echo "${ALL_PRESETS[$next_idx]}"
+}
+
+write_snippet() {
+  local preset
+  preset="$(normalize_preset "$1")"
+  local logical_shape
+  logical_shape="$(normalize_shape "$2")"
+  local ghostty_style
+  ghostty_style="$(ghostty_cursor_style "$logical_shape")"
+  local slash_mode
+  slash_mode="$(is_slash_sweep_shape "$logical_shape")"
+  local brackets_mode
+  brackets_mode="$(is_brackets_shape "$logical_shape")"
+  local pure_hollow
+  pure_hollow="$(is_pure_hollow_shape "$logical_shape")"
+  local base_shader
+  base_shader="$(resolve_shader "$preset")"
+
+  mkdir -p "$CONFIGS_DIR"
+  rm -f "$CONFIGS_DIR"/.slash-*.glsl "$CONFIGS_DIR"/.gen-*.glsl
+
+  local active_shader="$base_shader"
+  if [[ "$slash_mode" == "1" || "$brackets_mode" == "1" || "$pure_hollow" == "1" ]]; then
+    active_shader="$CONFIGS_DIR/.gen-${preset}-${logical_shape}.glsl"
+    {
+      echo "#define SLASH_SWEEP_MODE $slash_mode"
+      echo "#define BRACKETS_SHAPE_MODE $brackets_mode"
+      if [[ "$pure_hollow" == "1" ]]; then
+        echo "#undef CURSORSTYLE_BLOCK_HOLLOW"
+        echo "#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)"
+        echo "#undef CURSORSTYLE_BLOCK"
+        echo "#define CURSORSTYLE_BLOCK (-99)"
+      fi
+      cat "$base_shader"
+    } > "$active_shader"
+  fi
+
+  cat > "$SNIPPET_FILE" <<EOF
+# Managed by ghosttylib-cursor-control (./cursorctl)
+# Preset: $preset | Shape: $logical_shape
+
+# Native Ghostty geometry: bar | block | underline | block_hollow
+cursor-style = $ghostty_style
+
+# Prevent shell integration from emitting blinking DECSCUSR (\e[5 q / \e[1 q) that fights the shader
+shell-integration-features = no-cursor
+
+# Pass Cmd+Z / Cmd+Shift+Z through to terminal TUI apps instead of
+# Ghostty's default macOS Edit -> Undo menu shortcut (Cmd+Shift+T still reopens closed tabs)
+keybind = super+z=unbind
+keybind = super+shift+z=unbind
+
+# Disable Ghostty's hard binary blink so the GLSL shader controls the smooth animation cycle
+cursor-style-blink = false
+
+# Hide Ghostty's static native cursor so only the animated shader cursor is visible,
+# while keeping the character under block cursors rendered in its normal foreground color
+cursor-opacity = 0
+cursor-text = cell-foreground
+
+# Animate smoothly while Ghostty is focused (0% idle CPU when unfocused)
+custom-shader-animation = true
+
+# Active cursor shader
+custom-shader = $active_shader
+EOF
+
+  if command -v ghostty >/dev/null 2>&1; then
+    ghostty +validate-config --config-file="$SNIPPET_FILE" >/dev/null
+  fi
+}
+
+configure_ghostty() {
+  mkdir -p "$(dirname "$GHOSTTY_CONFIG")"
+  touch "$GHOSTTY_CONFIG"
+
+  if grep -Fqx "$INCLUDE_LINE" "$GHOSTTY_CONFIG"; then
+    echo "Ghostty include hook already present in $GHOSTTY_CONFIG"
+    return
+  fi
+
+  awk -v inc="$INCLUDE_LINE" '
+    { sub(/\r$/, "", $0) }
+    $0 == "# ghosttylib-cursor-control" || $0 == inc { next }
+    index($0, "config-file = ?") == 1 && $0 ~ /\/configs\/ghostty-cursor\.conf$/ { next }
+    { lines[++n] = $0 }
+    END {
+      while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+      for (i = 1; i <= n; i++) print lines[i]
+      if (n > 0) print ""
+      print "# ghosttylib-cursor-control"
+      print inc
+    }
+  ' "$GHOSTTY_CONFIG" > "${GHOSTTY_CONFIG}.tmp" && mv "${GHOSTTY_CONFIG}.tmp" "$GHOSTTY_CONFIG"
+  echo "Linked include hook in $GHOSTTY_CONFIG"
+}
+
+reload_ghostty() {
+  local target_shape="${1:-}"
+  ps -axo pid=,comm= 2>/dev/null | awk -v self="$$" '
+    {
+      pid = $1
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
+      n = split($0, parts, "/")
+      base = tolower(parts[n])
+      if (pid != self && (base == "ghostty" || index($0, "Ghostty.app/Contents/MacOS/") > 0)) {
+        print pid
+      }
+    }
+  ' | while read -r gpid; do
+    [[ -n "$gpid" ]] && kill -USR2 "$gpid" >/dev/null 2>&1 || true
+  done
+  if [[ -n "$target_shape" ]]; then
+    emit_shape_decscusr "$target_shape"
+  fi
+}
+
+launch_picker() {
+  local bin="$REPO_DIR/cursor-picker"
+  if [[ ! -x "$bin" ]] && command -v go >/dev/null 2>&1 && [[ -f "$REPO_DIR/go.mod" ]]; then
+    echo "Building cursor-picker..."
+    (cd "$REPO_DIR" && go build -o "$bin" ./cmd/cursor-picker)
+  fi
+  if [[ -x "$bin" ]]; then
+    exec "$bin" "$@"
+  else
+    echo "Error: cursor-picker binary not found (run 'go build -o cursor-picker ./cmd/cursor-picker')." >&2
+    exit 1
+  fi
+}
+
+if [[ $# -eq 0 ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    launch_picker
+  else
+    usage
+    exit 0
+  fi
+fi
+
+cmd="$1"
+
+case "$cmd" in
+  pick|ui|picker)
+    shift || true
+    launch_picker "$@"
+    ;;
+  install)
+    preset="${2:-katana}"
+    shape="${3:-slash}"
+    norm_p="$(normalize_preset "$preset")"
+    norm_s="$(normalize_shape "$shape")"
+    write_snippet "$norm_p" "$norm_s"
+    configure_ghostty
+    reload_ghostty "$norm_s"
+    echo ""
+    echo "Done! Active cursor: effect='$norm_p', shape='$norm_s' (auto-reloaded in Ghostty)."
+    ;;
+  set)
+    if [[ $# -lt 2 ]]; then
+      usage
+      exit 1
+    fi
+    if [[ "$2" == "off" || "$2" == "normal" || "$2" == "native" || "$2" == "disable" ]]; then
+      write_off_snippet
+      reload_ghostty "off"
+      echo "Custom cursor disabled -> stock native cursor restored (auto-reloaded in Ghostty)."
+      exit 0
+    fi
+    raw_arg="$2"
+    preset="$(normalize_preset "$raw_arg")"
+    # If user typed './cursorctl set brackets' with no shape arg, default shape to 'brackets'
+    if [[ $# -lt 3 && "$raw_arg" == "brackets" ]]; then
+      shape="brackets"
+    else
+      shape="${3:-$(current_shape)}"
+    fi
+    norm_s="$(normalize_shape "${shape:-slash}")"
+    write_snippet "$preset" "$norm_s"
+    reload_ghostty "$norm_s"
+    echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
+    ;;
+  shape)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: ./cursorctl shape <slash|bar|block|slash-block|underscore|hollow|slash-hollow|brackets|slash-brackets>" >&2
+      exit 1
+    fi
+    preset="$(current_preset)"
+    norm_s="$(normalize_shape "$2")"
+    write_snippet "$preset" "$norm_s"
+    reload_ghostty "$norm_s"
+    echo "Active shape -> $norm_s (effect: $preset) — $(shape_description "$norm_s")"
+    ;;
+  next)
+    preset="$(cycle_preset 1)"
+    shape="${2:-$(current_shape)}"
+    norm_s="$(normalize_shape "${shape:-slash}")"
+    write_snippet "$preset" "$norm_s"
+    reload_ghostty "$norm_s"
+    echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
+    ;;
+  prev)
+    preset="$(cycle_preset -1)"
+    shape="${2:-$(current_shape)}"
+    norm_s="$(normalize_shape "${shape:-slash}")"
+    write_snippet "$preset" "$norm_s"
+    reload_ghostty "$norm_s"
+    echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
+    ;;
+  off|disable|normal|native)
+    write_off_snippet
+    reload_ghostty "off"
+    echo "Custom cursor disabled -> stock native cursor restored (re-enable anytime with './cursorctl set katana')."
+    ;;
+  list)
+    active="$(raw_preset)"
+    if [[ "$active" != "off" ]]; then
+      active="$(normalize_preset "$active")"
+    fi
+    shape="$(current_shape)"
+    if [[ "$active" == "off" ]]; then
+      echo "Available effects (currently OFF — stock native cursor):"
+    else
+      echo "Available effects (use './cursorctl set <effect> [shape]'):"
+    fi
+    for p in "${ALL_PRESETS[@]}"; do
+      mark=" "
+      if [[ "$p" == "$active" ]]; then
+        mark="*"
+      fi
+      printf " %s %-15s %s\n" "$mark" "$p" "$(preset_description "$p")"
+    done
+    echo ""
+    echo "Available shapes (use './cursorctl shape <shape>'):"
+    for s in "${ALL_SHAPES[@]}"; do
+      mark=" "
+      if [[ "$active" != "off" && "$s" == "$shape" ]]; then
+        mark="*"
+      fi
+      printf " %s %-15s %s\n" "$mark" "$s" "$(shape_description "$s")"
+    done
+    ;;
+  status)
+    echo "Snippet file:    $SNIPPET_FILE"
+    if [[ -f "$SNIPPET_FILE" ]]; then
+      grep -E '^# Preset:|^cursor-style =|^custom-shader =' "$SNIPPET_FILE" | sed 's/^/  /'
+    else
+      echo "  (not generated)"
+    fi
+    echo ""
+    if [[ -f "$GHOSTTY_CONFIG" ]] && grep -Fqx "$INCLUDE_LINE" "$GHOSTTY_CONFIG"; then
+      echo "Ghostty config:  linked ($GHOSTTY_CONFIG)"
+    else
+      echo "Ghostty config:  not linked (stock Ghostty)"
+    fi
+    ;;
+  uninstall)
+    rm -f "$CONFIGS_DIR"/.slash-*.glsl "$CONFIGS_DIR"/.gen-*.glsl "$SNIPPET_FILE"
+
+    if [[ -f "$GHOSTTY_CONFIG" ]]; then
+      awk -v inc="$INCLUDE_LINE" '
+        { sub(/\r$/, "", $0) }
+        $0 == "# ghosttylib-cursor-control" || $0 == inc { next }
+        index($0, "config-file = ?") == 1 && $0 ~ /\/configs\/ghostty-cursor\.conf$/ { next }
+        { lines[++n] = $0 }
+        END {
+          while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+          for (i = 1; i <= n; i++) print lines[i]
+        }
+      ' "$GHOSTTY_CONFIG" > "${GHOSTTY_CONFIG}.tmp" && mv "${GHOSTTY_CONFIG}.tmp" "$GHOSTTY_CONFIG"
+      echo "Removed ghosttylib-cursor-control hook from $GHOSTTY_CONFIG"
+    fi
+
+    reload_ghostty
+    echo ""
+    echo "Uninstalled! Ghostty has been auto-reloaded back to your stock cursor."
+    ;;
+  help|-h|--help|*)
+    usage
+    ;;
+esac

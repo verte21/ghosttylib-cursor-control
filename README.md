@@ -4,6 +4,9 @@ GPU-accelerated custom cursor shader library, CLI controller, and live interacti
 
 Works across standard shells (`zsh`, `bash`, `fish`), terminal editors (`nvim`, `helix`), and full-screen TUI applications, and **persists automatically** across Ghostty restarts.
 
+> [!NOTE]
+> **Terminal Compatibility:** Currently supports standalone **[Ghostty](https://ghostty.org)** only (macOS & Linux). Other `libghostty`-based apps (such as `Rex Beta`) do not yet load external `custom-shader` `.glsl` files from disk, and other terminals (`WezTerm`, `Alacritty`, `iTerm2`, etc.) do not expose Ghostty's cursor shader uniform pipeline.
+
 ![Live Ghostty Cursor Picker](assets/preview.gif)
 
 ---

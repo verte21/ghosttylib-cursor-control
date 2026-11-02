@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+resolve_repo_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+REPO_DIR="$(resolve_repo_dir)"
 SHADERS_DIR="$REPO_DIR/shaders"
 CONFIGS_DIR="$REPO_DIR/configs"
 SNIPPET_FILE="$CONFIGS_DIR/ghostty-cursor.conf"
@@ -44,8 +55,9 @@ usage() {
 ghosttylib-cursor-control — GPU-accelerated orthogonal cursor shapes & effects for Ghostty
 
 Usage:
-  ./cursorctl [pick|ui]                  Launch interactive Go TUI picker with live preview
+  ./cursorctl [pick|ui]                  Launch interactive Go TUI picker (uses prebuilt or local binary)
   ./cursor-picker                        Launch interactive Go TUI picker directly
+  ./cursorctl build [--all|--clean]      Build cursor-picker from Go source (or cross-compile / reset)
   ./cursorctl set <effect> [shape]       Mix any effect with any cursor shape
   ./cursorctl shape <shape>              Switch cursor shape only (keeps current effect)
   ./cursorctl next [shape]               Cycle to the next effect (keeps current shape)
@@ -435,15 +447,11 @@ reload_ghostty() {
 }
 
 launch_picker() {
-  local bin="$REPO_DIR/cursor-picker"
-  if [[ ! -x "$bin" ]] && command -v go >/dev/null 2>&1 && [[ -f "$REPO_DIR/go.mod" ]]; then
-    echo "Building cursor-picker..."
-    (cd "$REPO_DIR" && go build -o "$bin" ./cmd/cursor-picker)
-  fi
-  if [[ -x "$bin" ]]; then
-    exec "$bin" "$@"
+  local launcher="$REPO_DIR/cursor-picker"
+  if [[ -x "$launcher" ]]; then
+    exec "$launcher" "$@"
   else
-    echo "Error: cursor-picker binary not found (run 'go build -o cursor-picker ./cmd/cursor-picker')." >&2
+    echo "Error: cursor-picker launcher not found at '$launcher'." >&2
     exit 1
   fi
 }
@@ -463,6 +471,23 @@ case "$cmd" in
   pick|ui|picker)
     shift || true
     launch_picker "$@"
+    ;;
+  build)
+    case "${2:-}" in
+      --all|all|--prebuilt|prebuilt)
+        exec "$REPO_DIR/cursor-picker" --build-all
+        ;;
+      --clean|clean|--use-prebuilt)
+        exec "$REPO_DIR/cursor-picker" --clean-build
+        ;;
+      ""|--local|local)
+        exec "$REPO_DIR/cursor-picker" --build
+        ;;
+      *)
+        echo "Usage: ./cursorctl build [--all | --clean]" >&2
+        exit 1
+        ;;
+    esac
     ;;
   install)
     preset="${2:-katana}"
@@ -571,6 +596,10 @@ case "$cmd" in
       echo "Ghostty config:  linked ($GHOSTTY_CONFIG)"
     else
       echo "Ghostty config:  not linked (stock Ghostty)"
+    fi
+    if [[ -x "$REPO_DIR/cursor-picker" ]]; then
+      picker_info="$("$REPO_DIR/cursor-picker" --which 2>/dev/null || echo "missing")"
+      echo "Picker binary:   $picker_info"
     fi
     ;;
   uninstall)

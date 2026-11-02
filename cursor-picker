@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_repo_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+REPO_DIR="$(resolve_repo_dir)"
+BIN_DIR="$REPO_DIR/bin"
+LOCAL_BIN="$BIN_DIR/cursor-picker-local"
+
+detect_platform() {
+  local uname_s uname_m os arch
+  uname_s="$(uname -s 2>/dev/null || echo unknown)"
+  uname_m="$(uname -m 2>/dev/null || echo unknown)"
+
+  case "$uname_s" in
+    Darwin) os="darwin" ;;
+    Linux)  os="linux" ;;
+    *)      os="$(printf '%s' "$uname_s" | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+
+  case "$uname_m" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64|amd64)  arch="amd64" ;;
+    *)             arch="$uname_m" ;;
+  esac
+
+  # Prefer native arm64 on Apple Silicon even if invoked from a Rosetta x86_64 shell
+  if [[ "$os" == "darwin" && "$arch" == "amd64" ]]; then
+    if [[ "$(sysctl -in hw.optional.arm64 2>/dev/null || echo 0)" == "1" ]]; then
+      arch="arm64"
+    fi
+  fi
+
+  echo "${os}-${arch}"
+}
+
+require_go() {
+  if ! command -v go >/dev/null 2>&1; then
+    echo "Error: Go toolchain not found in PATH (install Go 1.22+ to build from source, or run './cursor-picker' without --build to use the prebuilt binary)." >&2
+    exit 1
+  fi
+}
+
+build_local() {
+  require_go
+  mkdir -p "$BIN_DIR"
+  echo "Building cursor-picker from source..."
+  (cd "$REPO_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$LOCAL_BIN" ./cmd/cursor-picker)
+  chmod +x "$LOCAL_BIN"
+  echo "✓ Built local binary -> bin/cursor-picker-local (active for ./cursor-picker and ./cursorctl)"
+}
+
+build_all_prebuilt() {
+  require_go
+  mkdir -p "$BIN_DIR"
+  local targets=("darwin:arm64" "darwin:amd64" "linux:amd64" "linux:arm64")
+  for entry in "${targets[@]}"; do
+    local goos="${entry%%:*}"
+    local goarch="${entry##*:}"
+    local out="$BIN_DIR/cursor-picker-${goos}-${goarch}"
+    echo "Building prebuilt binary -> bin/cursor-picker-${goos}-${goarch}..."
+    (cd "$REPO_DIR" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/cursor-picker)
+    chmod +x "$out"
+  done
+  if [[ -f "$LOCAL_BIN" ]]; then
+    rm -f "$LOCAL_BIN"
+    echo "Removed bin/cursor-picker-local override so prebuilt binaries are active."
+  fi
+  echo "✓ Cross-compiled all 4 prebuilt binaries in bin/ (macOS arm64/amd64, Linux amd64/arm64)."
+}
+
+clean_local_build() {
+  if [[ -f "$LOCAL_BIN" ]]; then
+    rm -f "$LOCAL_BIN"
+    echo "✓ Removed bin/cursor-picker-local -> reverted to prebuilt binary."
+  else
+    echo "No local source build present (already using prebuilt binary)."
+  fi
+}
+
+resolve_active_bin() {
+  local platform prebuilt
+  platform="$(detect_platform)"
+  prebuilt="$BIN_DIR/cursor-picker-${platform}"
+
+  if [[ -x "$LOCAL_BIN" ]]; then
+    echo "$LOCAL_BIN"
+    return 0
+  fi
+  if [[ -x "$prebuilt" ]]; then
+    echo "$prebuilt"
+    return 0
+  fi
+  return 1
+}
+
+case "${1:-}" in
+  --build|build)
+    build_local
+    exit 0
+    ;;
+  --build-all|--prebuilt)
+    build_all_prebuilt
+    exit 0
+    ;;
+  --clean-build|--use-prebuilt)
+    clean_local_build
+    exit 0
+    ;;
+  --which)
+    if active="$(resolve_active_bin)"; then
+      if [[ "$active" == "$LOCAL_BIN" ]]; then
+        echo "$active (local source build)"
+      else
+        echo "$active (prebuilt)"
+      fi
+      exit 0
+    else
+      echo "No cursor-picker binary found for $(detect_platform) (run './cursor-picker --build' to compile from source)." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+if active="$(resolve_active_bin)"; then
+  export GHOSTTYLIB_CURSOR_ROOT="$REPO_DIR"
+  exec "$active" "$@"
+fi
+
+# Fallback for uncommon OS/arch combinations when Go is installed
+if command -v go >/dev/null 2>&1 && [[ -f "$REPO_DIR/go.mod" ]]; then
+  build_local >&2
+  export GHOSTTYLIB_CURSOR_ROOT="$REPO_DIR"
+  exec "$LOCAL_BIN" "$@"
+fi
+
+echo "Error: no prebuilt cursor-picker binary for '$(detect_platform)' and Go is not installed." >&2
+echo "Install Go 1.22+ and run './cursorctl build' (or './cursor-picker --build') to compile from source." >&2
+exit 1

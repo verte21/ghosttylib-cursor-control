@@ -13,10 +13,15 @@ Works across standard shells (`zsh`, `bash`, `fish`), terminal editors (`nvim`, 
 
 ## Quick Start
 
+Prebuilt `cursor-picker` binaries for **macOS** (`arm64` / `amd64`) and **Linux** (`amd64` / `arm64`) are included in `bin/`, so `./cursor-picker` works immediately after cloning — no Go installation required (or you can optionally compile from source anytime):
+
 ```bash
-# Launch the interactive Go TUI picker (renders Ghostty's REAL GPU cursor shaders live!)
+# Launch the interactive Go TUI picker immediately (uses prebuilt binary in bin/)
 ./cursor-picker
 # (or simply run `./cursorctl` with no arguments / `./cursorctl pick`)
+
+# Optional: compile your own local binary from Go source instead of using prebuilt:
+./cursorctl build
 
 # Or link & switch directly from the CLI (auto-reloads Ghostty via SIGUSR2):
 ./cursorctl install katana slash
@@ -47,8 +52,11 @@ Instead of approximating shaders with ASCII or block characters, `cursor-picker`
 | `Esc` / `q` / `Ctrl+C` | Revert to previous saved cursor & quit |
 
 ```bash
-# Rebuild from source anytime (Go 1.22+, zero external dependencies):
-go build -o cursor-picker ./cmd/cursor-picker
+# Prebuilt binaries in bin/ run out of the box — or optionally build from source (Go 1.22+, zero external deps):
+./cursorctl build               # Compile locally -> bin/cursor-picker-local (overrides prebuilt)
+./cursorctl build --clean       # Remove local build and revert to prebuilt binary
+./cursorctl build --all         # Cross-compile all 4 prebuilt macOS & Linux binaries in bin/
+./cursor-picker --which         # Check which binary is currently active
 ```
 
 ---
@@ -140,10 +148,11 @@ Effects and cursor shapes are completely independent — swap both together, or 
 
 ```text
 ghosttylib-cursor-control/
-├── cursor-picker               # Live Ghostty GPU cursor TUI picker binary
-├── cursorctl                   # CLI switcher, Ghostty snippet generator & installer
+├── cursor-picker               # Launcher for prebuilt or locally built Go TUI picker
+├── cursorctl                   # CLI switcher, builder, Ghostty snippet generator & installer
 ├── go.mod                      # Zero-dependency Go module
 ├── README.md                   # Documentation
+├── bin/                        # Prebuilt cursor-picker binaries (macOS arm64/amd64, Linux amd64/arm64)
 ├── assets/
 │   └── preview.gif             # Live Ghostty stage recording (katana, liquid, hud, prism, neon)
 ├── cmd/

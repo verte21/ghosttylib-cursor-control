@@ -1,5 +1,5 @@
 .DS_Store
-/cursor-picker
+/bin/cursor-picker-local
 /configs/ghostty-cursor.conf
 /configs/.gen-*.glsl
 /configs/.slash-*.glsl

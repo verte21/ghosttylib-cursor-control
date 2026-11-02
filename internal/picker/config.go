@@ -28,9 +28,16 @@ func ResolveRepoRoot() (string, error) {
 	}
 	exe, err := os.Executable()
 	if err == nil {
+		if realExe, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = realExe
+		}
 		exeDir := filepath.Dir(exe)
 		if hasShadersDir(exeDir) {
 			return exeDir, nil
+		}
+		parentDir := filepath.Dir(exeDir)
+		if parentDir != exeDir && hasShadersDir(parentDir) {
+			return parentDir, nil
 		}
 	}
 	cwd, err := os.Getwd()

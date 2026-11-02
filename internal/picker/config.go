@@ -17,6 +17,7 @@ type ActiveState struct {
 	Effect         EffectID
 	Shape          ShapeID
 	OverrideColors bool
+	OverrideShapes bool
 	Linked         bool
 	RepoRoot       string
 }
@@ -178,6 +179,9 @@ func ReadActiveState(repoRoot string) ActiveState {
 					} else if strings.HasPrefix(seg, "OverrideColors:") {
 						v := strings.TrimSpace(strings.TrimPrefix(seg, "OverrideColors:"))
 						st.OverrideColors = strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || v == "1"
+					} else if strings.HasPrefix(seg, "OverrideShapes:") {
+						v := strings.TrimSpace(strings.TrimPrefix(seg, "OverrideShapes:"))
+						st.OverrideShapes = strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || v == "1"
 					}
 				}
 				break
@@ -256,8 +260,8 @@ func ShapeDECSCUSR(shape ShapeInfo, off bool) string {
 }
 
 // ApplySelection writes configs/ghostty-cursor.conf directly in <0.2ms and ensures Ghostty is linked.
-func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo, overrideColors bool) error {
-	if err := writeSnippetDirect(repoRoot, effect, shape, false, overrideColors); err != nil {
+func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo, overrideColors bool, overrideShapes bool) error {
+	if err := writeSnippetDirect(repoRoot, effect, shape, false, overrideColors, overrideShapes); err != nil {
 		return err
 	}
 	_ = EnsureGhosttyLinked(repoRoot)
@@ -266,7 +270,7 @@ func ApplySelection(repoRoot string, effect EffectInfo, shape ShapeInfo, overrid
 
 // ApplyOff disables custom cursor shaders (stock native Ghostty cursor).
 func ApplyOff(repoRoot string) error {
-	return writeSnippetDirect(repoRoot, AllEffects[0], AllShapes[0], true, false)
+	return writeSnippetDirect(repoRoot, AllEffects[0], AllShapes[0], true, false, false)
 }
 
 // RestoreState restores a previously saved ActiveState back to configs/ghostty-cursor.conf.
@@ -276,7 +280,7 @@ func RestoreState(repoRoot string, st ActiveState) error {
 	}
 	eff := AllEffects[FindEffectIndex(string(st.Effect))]
 	shp := AllShapes[FindShapeIndex(string(st.Shape))]
-	return writeSnippetDirect(repoRoot, eff, shp, false, st.OverrideColors)
+	return writeSnippetDirect(repoRoot, eff, shp, false, st.OverrideColors, st.OverrideShapes)
 }
 
 var (
@@ -399,17 +403,66 @@ func ReloadGhostty() int {
 	return signaled
 }
 
-func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool) error {
+func ghosttyShaderStyleMacro(style NativeStyle) string {
+	switch style {
+	case StyleBar:
+		return "CURSORSTYLE_BAR"
+	case StyleUnderline:
+		return "CURSORSTYLE_UNDERLINE"
+	case StyleBlockHollow:
+		return "CURSORSTYLE_BLOCK_HOLLOW"
+	default:
+		return "CURSORSTYLE_BLOCK"
+	}
+}
+
+func writeShapeLockGLSL(hdr *strings.Builder, targetMacro string) {
+	fmt.Fprintf(hdr, `vec4 _gccRawCur() { return iCurrentCursor; }
+vec4 _gccRawPrev() { return iPreviousCursor; }
+int _gccRawStyle() { return iCurrentCursorStyle; }
+int _gccRawPrevStyle() { return iPreviousCursorStyle; }
+vec4 _gccLockCursorBox(vec4 raw, int rawStyle, int targetStyle) {
+    if (raw.z <= 0.0 || raw.w <= 0.0 || rawStyle == CURSORSTYLE_LOCK || rawStyle == targetStyle) {
+        return raw;
+    }
+    float cellX = raw.x;
+    float cellTopY = raw.y;
+    float cellW = raw.z;
+    float cellH = raw.w;
+    if (rawStyle == CURSORSTYLE_BAR) {
+        cellW = max(floor(raw.w * 0.48 + 0.5), 8.0);
+    } else if (rawStyle == CURSORSTYLE_UNDERLINE) {
+        cellH = max(floor(raw.z * 2.15 + 0.5), 18.0);
+        cellTopY = (raw.y - raw.w) + cellH;
+    }
+    if (targetStyle == CURSORSTYLE_BAR) {
+        float barW = clamp(floor(cellH / 14.0 + 0.5), 2.0, 3.0);
+        return vec4(cellX, cellTopY, barW, cellH);
+    }
+    if (targetStyle == CURSORSTYLE_UNDERLINE) {
+        float lineH = clamp(floor(cellH / 14.0 + 0.5), 2.0, 3.0);
+        return vec4(cellX, (cellTopY - cellH) + lineH, cellW, lineH);
+    }
+    return vec4(cellX, cellTopY, cellW, cellH);
+}
+#define _GCC_TARGET_STYLE %s
+#define iCurrentCursor (_gccLockCursorBox(_gccRawCur(), _gccRawStyle(), _GCC_TARGET_STYLE))
+#define iPreviousCursor (_gccLockCursorBox(_gccRawPrev(), _gccRawPrevStyle(), _GCC_TARGET_STYLE))
+#define iCurrentCursorStyle ((_gccRawStyle() == CURSORSTYLE_LOCK) ? CURSORSTYLE_LOCK : _GCC_TARGET_STYLE)
+`, targetMacro)
+}
+
+func writeSnippetDirect(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool, overrideShapes bool) error {
 	var forcedRGB *[3]float64
 	if overrideColors {
 		if r, g, b, ok := ReadGhosttyCursorColorRGB(); ok {
 			forcedRGB = &[3]float64{r, g, b}
 		}
 	}
-	return writeSnippetWithColor(repoRoot, effect, shape, off, overrideColors, forcedRGB)
+	return writeSnippetWithColor(repoRoot, effect, shape, off, overrideColors, overrideShapes, forcedRGB)
 }
 
-func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool, forcedRGB *[3]float64) error {
+func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, off bool, overrideColors bool, overrideShapes bool, forcedRGB *[3]float64) error {
 	cfgDir := filepath.Join(repoRoot, "configs")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		return err
@@ -429,7 +482,7 @@ func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, 
 	baseShader := filepath.Join(repoRoot, "shaders", effect.ShaderFile)
 	activeShader := baseShader
 	isPureHollow := shape.NativeStyle == StyleBlockHollow && !shape.BracketsSDF
-	if shape.SlashSweep || shape.BracketsSDF || isPureHollow || overrideColors {
+	if shape.SlashSweep || shape.BracketsSDF || isPureHollow || overrideColors || overrideShapes {
 		slashVal := 0
 		if shape.SlashSweep {
 			slashVal = 1
@@ -445,7 +498,10 @@ func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, 
 		activeShader = filepath.Join(cfgDir, fmt.Sprintf(".gen-%s-%s.glsl", effect.ID, shape.ID))
 		var hdr strings.Builder
 		fmt.Fprintf(&hdr, "#define SLASH_SWEEP_MODE %d\n#define BRACKETS_SHAPE_MODE %d\n", slashVal, bracketsVal)
-		if isPureHollow {
+		if overrideShapes {
+			// Ignore runtime DECSCUSR shape overrides from TUI apps (e.g. opencode, nvim) and lock cursor geometry in the shader.
+			writeShapeLockGLSL(&hdr, ghosttyShaderStyleMacro(shape.NativeStyle))
+		} else if isPureHollow {
 			// Ensure hollow wireframe renders identically both on new tabs (CURSORSTYLE_BLOCK_HOLLOW)
 			// and on already-open tabs switched live via DECSCUSR \x1b[2 q (full-cell geometry).
 			hdr.WriteString("#undef CURSORSTYLE_BLOCK_HOLLOW\n#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)\n")
@@ -467,7 +523,7 @@ func writeSnippetWithColor(repoRoot string, effect EffectInfo, shape ShapeInfo, 
 	}
 
 	content := fmt.Sprintf(`# Managed by ghosttylib-cursor-control (./cursorctl)
-# Preset: %s | Shape: %s | OverrideColors: %t
+# Preset: %s | Shape: %s | OverrideColors: %t | OverrideShapes: %t
 
 # Native Ghostty geometry: bar | block | underline | block_hollow
 cursor-style = %s
@@ -493,7 +549,7 @@ custom-shader-animation = true
 
 # Active cursor shader
 custom-shader = %s
-`, effect.ID, shape.ID, overrideColors, shape.GhosttyStyle, activeShader)
+`, effect.ID, shape.ID, overrideColors, overrideShapes, shape.GhosttyStyle, activeShader)
 
 	return os.WriteFile(snippet, []byte(content), 0o644)
 }

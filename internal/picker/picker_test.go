@@ -21,7 +21,9 @@ func TestTUIFrameExactColumnAlignmentAndStageCoordinates(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(tmp, "configs"), 0o755)
 
 	app := NewApp(tmp)
-	for _, confirm := range []confirmPromptMode{confirmNone, confirmSaveExit} {
+	app.savedState.OverrideColors = true
+	app.savedState.OverrideShapes = true
+	for _, confirm := range []confirmPromptMode{confirmNone, confirmSaveExit, confirmSaveExitShapes} {
 		app.confirmMode = confirm
 		for _, size := range [][2]int{{86, 24}, {100, 26}, {116, 30}, {132, 40}} {
 			lines, origin := app.RenderFrame(size[0], size[1])
@@ -53,7 +55,13 @@ func TestTUIFrameExactColumnAlignmentAndStageCoordinates(t *testing.T) {
 			if confirm == confirmSaveExit {
 				joined := stripANSI(strings.Join(lines, "\n"))
 				if !strings.Contains(joined, "Override app/tool cursor colors? [y/N]") || !strings.Contains(joined, "Override app/tool colors (opencode, nvim)? [y/N]") {
-					t.Fatalf("size %v missing [y/N] prompt in rendered frame:\n%s", size, joined)
+					t.Fatalf("size %v missing color [y/N] prompt in rendered frame:\n%s", size, joined)
+				}
+			}
+			if confirm == confirmSaveExitShapes {
+				joined := stripANSI(strings.Join(lines, "\n"))
+				if !strings.Contains(joined, "Lock cursor shape in apps/TUIs? [y/N]") || !strings.Contains(joined, "Lock cursor shape in apps (opencode, nvim)? [y/N]") {
+					t.Fatalf("size %v missing shape [y/N] prompt in rendered frame:\n%s", size, joined)
 				}
 			}
 		}
@@ -107,25 +115,28 @@ func TestConfigApplyHollowAndOverrideColorsMacrosAndRestore(t *testing.T) {
 		t.Fatalf("unexpected parsed RGB: (%v, %v, %v, %v)", r, g, b, ok)
 	}
 
-	// Start with neon + bar + overrideColors=true (explicit #39ff14)
+	// Start with neon + bar + overrideColors=true + overrideShapes=true (explicit #39ff14)
 	rgb := [3]float64{r, g, b}
-	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("neon")], AllShapes[FindShapeIndex("bar")], false, true, &rgb); err != nil {
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("neon")], AllShapes[FindShapeIndex("bar")], false, true, true, &rgb); err != nil {
 		t.Fatal(err)
 	}
 	saved := ReadActiveState(tmp)
-	if saved.Effect != EffectNeon || saved.Shape != ShapeBar || !saved.OverrideColors {
+	if saved.Effect != EffectNeon || saved.Shape != ShapeBar || !saved.OverrideColors || !saved.OverrideShapes {
 		t.Fatalf("unexpected saved state: %+v", saved)
 	}
 	genBar, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-neon-bar.glsl"))
 	if err != nil {
-		t.Fatalf("expected .gen-neon-bar.glsl when overrideColors=true: %v", err)
+		t.Fatalf("expected .gen-neon-bar.glsl when overrides=true: %v", err)
 	}
 	if !strings.Contains(string(genBar), "#define iCurrentCursorColor vec4(0.223529, 1.000000, 0.078431, 1.0)") {
 		t.Fatalf("missing forced RGB macro in generated shader: %s", string(genBar))
 	}
+	if !strings.Contains(string(genBar), "#define _GCC_TARGET_STYLE CURSORSTYLE_BAR") || !strings.Contains(string(genBar), "_gccLockCursorBox") {
+		t.Fatalf("missing shape lock macros in generated shader: %s", string(genBar))
+	}
 
-	// Fallback when no hex cursor-color is set (theme color via iCursorColor)
-	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("katana")], AllShapes[FindShapeIndex("bar")], false, true, nil); err != nil {
+	// Fallback when no hex cursor-color is set (theme color via iCursorColor), overrideShapes=false
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("katana")], AllShapes[FindShapeIndex("bar")], false, true, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	genTheme, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-katana-bar.glsl"))
@@ -135,9 +146,12 @@ func TestConfigApplyHollowAndOverrideColorsMacrosAndRestore(t *testing.T) {
 	if !strings.Contains(string(genTheme), "#define iCurrentCursorColor vec4(iCursorColor, 1.0)") {
 		t.Fatalf("missing fallback iCursorColor macro: %s", string(genTheme))
 	}
+	if strings.Contains(string(genTheme), "_gccLockCursorBox") {
+		t.Fatalf("unexpected shape lock macro when overrideShapes=false: %s", string(genTheme))
+	}
 
-	// Switch to liquid + hollow (overrideColors=false) and verify hollow macro without color override
-	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("liquid")], AllShapes[FindShapeIndex("hollow")], false, false, nil); err != nil {
+	// Switch to liquid + hollow (overrideColors=false, overrideShapes=false) and verify hollow macro without overrides
+	if err := writeSnippetWithColor(tmp, AllEffects[FindEffectIndex("liquid")], AllShapes[FindShapeIndex("hollow")], false, false, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	genHollow, err := os.ReadFile(filepath.Join(tmp, "configs", ".gen-liquid-hollow.glsl"))
@@ -162,12 +176,12 @@ func TestConfigApplyHollowAndOverrideColorsMacrosAndRestore(t *testing.T) {
 		t.Fatalf("expected \\x1b[2 q for hollow, got %q", got)
 	}
 
-	// Revert to saved (neon + bar + OverrideColors=true)
+	// Revert to saved (neon + bar + OverrideColors=true + OverrideShapes=true)
 	if err := RestoreState(tmp, saved); err != nil {
 		t.Fatal(err)
 	}
 	reverted := ReadActiveState(tmp)
-	if reverted.Effect != EffectNeon || reverted.Shape != ShapeBar || !reverted.OverrideColors || reverted.Off {
+	if reverted.Effect != EffectNeon || reverted.Shape != ShapeBar || !reverted.OverrideColors || !reverted.OverrideShapes || reverted.Off {
 		t.Fatalf("unexpected reverted state: %+v", reverted)
 	}
 }

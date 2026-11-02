@@ -46,7 +46,17 @@ const (
 	confirmNone confirmPromptMode = iota
 	confirmSaveExit
 	confirmSaveStay
+	confirmSaveExitShapes
+	confirmSaveStayShapes
 )
+
+func (m confirmPromptMode) isShapesStep() bool {
+	return m == confirmSaveExitShapes || m == confirmSaveStayShapes
+}
+
+func (m confirmPromptMode) exitAfterSave() bool {
+	return m == confirmSaveExit || m == confirmSaveExitShapes
+}
 
 // Result describes the outcome when exiting cursor-picker.
 type Result struct {
@@ -54,21 +64,23 @@ type Result struct {
 	TurnedOff      bool
 	Reverted       bool
 	OverrideColors bool
+	OverrideShapes bool
 	Effect         EffectInfo
 	Shape          ShapeInfo
 }
 
 type App struct {
-	repoRoot         string
-	savedState       ActiveState
-	shapeIdx         int
-	effectIdx        int
-	focus            FocusCol
-	previewOff       bool
-	ghosttyConnected bool
-	stage            *LiveStage
-	statusNotice     string
-	confirmMode      confirmPromptMode
+	repoRoot              string
+	savedState            ActiveState
+	shapeIdx              int
+	effectIdx             int
+	focus                 FocusCol
+	previewOff            bool
+	ghosttyConnected      bool
+	stage                 *LiveStage
+	statusNotice          string
+	confirmMode           confirmPromptMode
+	pendingOverrideColors bool
 }
 
 func NewApp(repoRoot string) *App {
@@ -365,12 +377,22 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 	}
 
 	if a.confirmMode != confirmNone {
-		p1 := fmt.Sprintf(" %s%s?%s %s%sOverride app/tool cursor colors? [y/N]%s",
-			ansiBold, ansiAmber, ansiNoBold, ansiBold, ansiText, ansiNoBold)
-		p2 := fmt.Sprintf("   %s%sy%s %sForce Ghostty%s  %s%sN/Enter%s %sKeep%s  %sEsc%s %scancel%s",
-			ansiBold, ansiGreen, ansiNoBold, ansiText, ansiMuted,
-			ansiBold, ansiCyan, ansiNoBold, ansiText, ansiMuted,
-			ansiMuted, ansiNoBold, ansiDim, ansiNoBold)
+		var p1, p2 string
+		if a.confirmMode.isShapesStep() {
+			p1 = fmt.Sprintf(" %s%s?%s %s%sLock cursor shape in apps/TUIs? [y/N]%s",
+				ansiBold, ansiAmber, ansiNoBold, ansiBold, ansiText, ansiNoBold)
+			p2 = fmt.Sprintf("   %s%sy%s %sLock shape%s  %s%sN/Enter%s %sApp mode%s  %sEsc%s %scancel%s",
+				ansiBold, ansiGreen, ansiNoBold, ansiText, ansiMuted,
+				ansiBold, ansiCyan, ansiNoBold, ansiText, ansiMuted,
+				ansiMuted, ansiNoBold, ansiDim, ansiNoBold)
+		} else {
+			p1 = fmt.Sprintf(" %s%s?%s %s%sOverride app/tool cursor colors? [y/N]%s",
+				ansiBold, ansiAmber, ansiNoBold, ansiBold, ansiText, ansiNoBold)
+			p2 = fmt.Sprintf("   %s%sy%s %sForce Ghostty%s  %s%sN/Enter%s %sKeep%s  %sEsc%s %scancel%s",
+				ansiBold, ansiGreen, ansiNoBold, ansiText, ansiMuted,
+				ansiBold, ansiCyan, ansiNoBold, ansiText, ansiMuted,
+				ansiMuted, ansiNoBold, ansiDim, ansiNoBold)
+		}
 		prevLines = append(prevLines, renderPromptBannerRow(p1, wPreview))
 		prevLines = append(prevLines, renderPromptBannerRow(p2, wPreview))
 	} else if a.stage.Paused {
@@ -424,8 +446,12 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 	savedLabel := fmt.Sprintf("%s + %s", a.savedState.Effect, a.savedState.Shape)
 	if a.savedState.Off {
 		savedLabel = "off (stock)"
+	} else if a.savedState.OverrideColors && a.savedState.OverrideShapes {
+		savedLabel += " [color+shape]"
 	} else if a.savedState.OverrideColors {
 		savedLabel += " [override]"
+	} else if a.savedState.OverrideShapes {
+		savedLabel += " [shape-lock]"
 	}
 	titleLeft := " ghosttylib-cursor-control "
 	titleRight := fmt.Sprintf(" Saved: %s ", savedLabel)
@@ -468,9 +494,13 @@ func (a *App) RenderFrame(termCols, termRows int) ([]string, StageOrigin) {
 
 	var helpLine string
 	if a.confirmMode != confirmNone {
+		promptText := "Override app/tool colors (opencode, nvim)? [y/N]"
+		if a.confirmMode.isShapesStep() {
+			promptText = "Lock cursor shape in apps (opencode, nvim)? [y/N]"
+		}
 		helpLine = fmt.Sprintf(
-			" %s%sOverride app/tool colors (opencode, nvim)? [y/N]%s  %s%sy%s %sYes%s  %s%sN/Enter%s %sNo%s  %sEsc%s %scancel%s",
-			ansiAmber, ansiBold, ansiReset,
+			" %s%s%s%s  %s%sy%s %sYes%s  %s%sN/Enter%s %sNo%s  %sEsc%s %scancel%s",
+			ansiAmber, ansiBold, promptText, ansiReset,
 			ansiGreen, ansiBold, ansiReset, ansiText, ansiReset,
 			ansiCyan, ansiBold, ansiReset, ansiText, ansiReset,
 			ansiMuted, ansiReset, ansiDim, ansiReset,
@@ -652,10 +682,10 @@ func RunInteractive(repoRoot string) (Result, error) {
 		resetTimer(reloadTimer, 35*time.Millisecond)
 	}
 
-	commitSave := func(overrideColors bool, exitAfter bool) (Result, bool, error) {
+	commitSave := func(overrideColors bool, overrideShapes bool, exitAfter bool) (Result, bool, error) {
 		eff := AllEffects[app.effectIdx]
 		shp := AllShapes[app.shapeIdx]
-		if err := ApplySelection(app.repoRoot, eff, shp, overrideColors); err != nil {
+		if err := ApplySelection(app.repoRoot, eff, shp, overrideColors, overrideShapes); err != nil {
 			return Result{}, false, err
 		}
 		ReloadGhostty()
@@ -664,20 +694,26 @@ func RunInteractive(repoRoot string) (Result, error) {
 		app.savedState.Effect = eff.ID
 		app.savedState.Shape = shp.ID
 		app.savedState.OverrideColors = overrideColors
+		app.savedState.OverrideShapes = overrideShapes
 		app.confirmMode = confirmNone
 		if exitAfter {
 			return Result{
 				Saved:          true,
 				OverrideColors: overrideColors,
+				OverrideShapes: overrideShapes,
 				Effect:         eff,
 				Shape:          shp,
 			}, true, nil
 		}
-		modeLabel := "keep tool colors"
+		colorMode := "app colors"
 		if overrideColors {
-			modeLabel = "override tool colors"
+			colorMode = "force color"
 		}
-		app.statusNotice = fmt.Sprintf("Saved: %s + %s (%s)", eff.ID, shp.ID, modeLabel)
+		shapeMode := "app shapes"
+		if overrideShapes {
+			shapeMode = "lock shape"
+		}
+		app.statusNotice = fmt.Sprintf("Saved: %s + %s (%s, %s)", eff.ID, shp.ID, colorMode, shapeMode)
 		needClear = true
 		drawUI()
 		return Result{}, false, nil
@@ -696,7 +732,7 @@ func RunInteractive(repoRoot string) (Result, error) {
 			if app.previewOff {
 				_ = ApplyOff(app.repoRoot)
 			} else {
-				_ = ApplySelection(app.repoRoot, AllEffects[app.effectIdx], AllShapes[app.shapeIdx], app.savedState.OverrideColors)
+				_ = ApplySelection(app.repoRoot, AllEffects[app.effectIdx], AllShapes[app.shapeIdx], app.savedState.OverrideColors, app.savedState.OverrideShapes)
 			}
 			signaled := ReloadGhostty()
 			if signaled > 0 != app.ghosttyConnected {
@@ -719,9 +755,10 @@ func RunInteractive(repoRoot string) (Result, error) {
 				return Result{Reverted: true}, nil
 			}
 
-			// Handle [y/N] confirmation prompt when saving!
+			// Handle [y/N] confirmation prompts (1: color override, 2: shape lock) when saving!
 			if app.confirmMode != confirmNone {
-				exitAfter := app.confirmMode == confirmSaveExit
+				exitAfter := app.confirmMode.exitAfterSave()
+				isShapes := app.confirmMode.isShapesStep()
 				switch rawKey {
 				case "\x03": // Ctrl+C still reverts & exits immediately
 					_ = RestoreState(app.repoRoot, app.savedState)
@@ -732,21 +769,43 @@ func RunInteractive(repoRoot string) (Result, error) {
 					app.confirmMode = confirmNone
 					needClear = true
 					drawUI()
-				case "y", "Y": // Yes: force Ghostty cursor-color over app/tool OSC 12 colors
-					res, done, err := commitSave(true, exitAfter)
-					if err != nil {
-						return Result{}, err
+				case "y", "Y":
+					if !isShapes {
+						app.pendingOverrideColors = true
+						if exitAfter {
+							app.confirmMode = confirmSaveExitShapes
+						} else {
+							app.confirmMode = confirmSaveStayShapes
+						}
+						needClear = true
+						drawUI()
+					} else {
+						res, done, err := commitSave(app.pendingOverrideColors, true, exitAfter)
+						if err != nil {
+							return Result{}, err
+						}
+						if done {
+							return res, nil
+						}
 					}
-					if done {
-						return res, nil
-					}
-				case "n", "N", "\r", "\n": // No (default): respect app/tool OSC 12 colors
-					res, done, err := commitSave(false, exitAfter)
-					if err != nil {
-						return Result{}, err
-					}
-					if done {
-						return res, nil
+				case "n", "N", "\r", "\n":
+					if !isShapes {
+						app.pendingOverrideColors = false
+						if exitAfter {
+							app.confirmMode = confirmSaveExitShapes
+						} else {
+							app.confirmMode = confirmSaveStayShapes
+						}
+						needClear = true
+						drawUI()
+					} else {
+						res, done, err := commitSave(app.pendingOverrideColors, false, exitAfter)
+						if err != nil {
+							return Result{}, err
+						}
+						if done {
+							return res, nil
+						}
 					}
 				}
 				continue

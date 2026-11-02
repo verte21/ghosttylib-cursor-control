@@ -32,7 +32,7 @@ Interactive Controls:
   p                     Pause / resume cursor movement (inspect idle cycle)
   o                     Toggle stock native cursor (off)
   a                     Save current combo as baseline without closing
-  Enter                 Prompt whether to override tool colors [y/N], then save & exit
+  Enter                 Prompt for app color & shape overrides [y/N], then save & exit
   Esc / q / Ctrl+C      Revert to previous cursor & quit
 `)
 }
@@ -67,8 +67,12 @@ func main() {
 		if res.OverrideColors {
 			colorMode = "override tool colors"
 		}
-		fmt.Printf("✓ Active cursor -> effect: %s | shape: %s (%s) — %s\n",
-			res.Effect.ID, res.Shape.ID, colorMode, res.Effect.Summary)
+		shapeMode := "respect app shapes"
+		if res.OverrideShapes {
+			shapeMode = "lock cursor shape"
+		}
+		fmt.Printf("✓ Active cursor -> effect: %s | shape: %s (%s, %s) — %s\n",
+			res.Effect.ID, res.Shape.ID, colorMode, shapeMode, res.Effect.Summary)
 	case res.Reverted:
 		fmt.Println("Reverted to previous cursor configuration.")
 	}

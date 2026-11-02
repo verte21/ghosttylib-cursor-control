@@ -60,6 +60,8 @@ Usage:
   ./cursorctl build [--all|--clean]      Build cursor-picker from Go source (or cross-compile / reset)
   ./cursorctl set <effect> [shape]       Mix any effect with any cursor shape
   ./cursorctl shape <shape>              Switch cursor shape only (keeps current effect)
+  ./cursorctl lock-shape <on|off>        Force cursor shape in TUI apps (opencode, nvim)
+  ./cursorctl override-colors <on|off>   Force Ghostty cursor-color over app OSC 12 colors
   ./cursorctl next [shape]               Cycle to the next effect (keeps current shape)
   ./cursorctl prev [shape]               Cycle to the previous effect (keeps current shape)
   ./cursorctl off                        Temporarily revert to stock native cursor
@@ -262,6 +264,65 @@ current_override_colors() {
   echo "false"
 }
 
+current_override_shapes() {
+  if [[ -f "$SNIPPET_FILE" ]]; then
+    local v
+    v="$(awk -F'OverrideShapes:[[:space:]]*' '/^# Preset:.*OverrideShapes:/ { sub(/\|.*/, "", $2); gsub(/[[:space:]]/, "", $2); print tolower($2); exit }' "$SNIPPET_FILE")"
+    if [[ "$v" == "true" || "$v" == "yes" || "$v" == "1" ]]; then
+      echo "true"
+      return
+    fi
+  fi
+  echo "false"
+}
+
+ghostty_shader_style_macro() {
+  case "$1" in
+    bar)          echo "CURSORSTYLE_BAR" ;;
+    underline)    echo "CURSORSTYLE_UNDERLINE" ;;
+    block_hollow) echo "CURSORSTYLE_BLOCK_HOLLOW" ;;
+    *)            echo "CURSORSTYLE_BLOCK" ;;
+  esac
+}
+
+emit_shape_lock_glsl() {
+  local target_macro="$1"
+  cat <<EOF
+vec4 _gccRawCur() { return iCurrentCursor; }
+vec4 _gccRawPrev() { return iPreviousCursor; }
+int _gccRawStyle() { return iCurrentCursorStyle; }
+int _gccRawPrevStyle() { return iPreviousCursorStyle; }
+vec4 _gccLockCursorBox(vec4 raw, int rawStyle, int targetStyle) {
+    if (raw.z <= 0.0 || raw.w <= 0.0 || rawStyle == CURSORSTYLE_LOCK || rawStyle == targetStyle) {
+        return raw;
+    }
+    float cellX = raw.x;
+    float cellTopY = raw.y;
+    float cellW = raw.z;
+    float cellH = raw.w;
+    if (rawStyle == CURSORSTYLE_BAR) {
+        cellW = max(floor(raw.w * 0.48 + 0.5), 8.0);
+    } else if (rawStyle == CURSORSTYLE_UNDERLINE) {
+        cellH = max(floor(raw.z * 2.15 + 0.5), 18.0);
+        cellTopY = (raw.y - raw.w) + cellH;
+    }
+    if (targetStyle == CURSORSTYLE_BAR) {
+        float barW = clamp(floor(cellH / 14.0 + 0.5), 2.0, 3.0);
+        return vec4(cellX, cellTopY, barW, cellH);
+    }
+    if (targetStyle == CURSORSTYLE_UNDERLINE) {
+        float lineH = clamp(floor(cellH / 14.0 + 0.5), 2.0, 3.0);
+        return vec4(cellX, (cellTopY - cellH) + lineH, cellW, lineH);
+    }
+    return vec4(cellX, cellTopY, cellW, cellH);
+}
+#define _GCC_TARGET_STYLE $target_macro
+#define iCurrentCursor (_gccLockCursorBox(_gccRawCur(), _gccRawStyle(), _GCC_TARGET_STYLE))
+#define iPreviousCursor (_gccLockCursorBox(_gccRawPrev(), _gccRawPrevStyle(), _GCC_TARGET_STYLE))
+#define iCurrentCursorStyle ((_gccRawStyle() == CURSORSTYLE_LOCK) ? CURSORSTYLE_LOCK : _GCC_TARGET_STYLE)
+EOF
+}
+
 ghostty_color_vec4_macro() {
   local hex=""
   local cfgs=("$XDG_GHOSTTY_CONFIG")
@@ -342,17 +403,20 @@ write_snippet() {
   local base_shader
   base_shader="$(resolve_shader "$preset")"
   local override_colors="${3:-$(current_override_colors)}"
+  local override_shapes="${4:-$(current_override_shapes)}"
 
   mkdir -p "$CONFIGS_DIR"
   rm -f "$CONFIGS_DIR"/.slash-*.glsl "$CONFIGS_DIR"/.gen-*.glsl
 
   local active_shader="$base_shader"
-  if [[ "$slash_mode" == "1" || "$brackets_mode" == "1" || "$pure_hollow" == "1" || "$override_colors" == "true" ]]; then
+  if [[ "$slash_mode" == "1" || "$brackets_mode" == "1" || "$pure_hollow" == "1" || "$override_colors" == "true" || "$override_shapes" == "true" ]]; then
     active_shader="$CONFIGS_DIR/.gen-${preset}-${logical_shape}.glsl"
     {
       echo "#define SLASH_SWEEP_MODE $slash_mode"
       echo "#define BRACKETS_SHAPE_MODE $brackets_mode"
-      if [[ "$pure_hollow" == "1" ]]; then
+      if [[ "$override_shapes" == "true" ]]; then
+        emit_shape_lock_glsl "$(ghostty_shader_style_macro "$ghostty_style")"
+      elif [[ "$pure_hollow" == "1" ]]; then
         echo "#undef CURSORSTYLE_BLOCK_HOLLOW"
         echo "#define CURSORSTYLE_BLOCK_HOLLOW (iCurrentCursorStyle)"
         echo "#undef CURSORSTYLE_BLOCK"
@@ -368,7 +432,7 @@ write_snippet() {
 
   cat > "$SNIPPET_FILE" <<EOF
 # Managed by ghosttylib-cursor-control (./cursorctl)
-# Preset: $preset | Shape: $logical_shape | OverrideColors: $override_colors
+# Preset: $preset | Shape: $logical_shape | OverrideColors: $override_colors | OverrideShapes: $override_shapes
 
 # Native Ghostty geometry: bar | block | underline | block_hollow
 cursor-style = $ghostty_style
@@ -456,6 +520,45 @@ launch_picker() {
   fi
 }
 
+# Extract optional --lock-shape / --no-lock-shape / --override-colors / --no-override-colors flags
+OVERRIDE_COLORS_ARG=""
+OVERRIDE_SHAPES_ARG=""
+POSITIONAL_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --lock-shape|--override-shapes)       OVERRIDE_SHAPES_ARG="true" ;;
+    --no-lock-shape|--no-override-shapes) OVERRIDE_SHAPES_ARG="false" ;;
+    --override-colors)                    OVERRIDE_COLORS_ARG="true" ;;
+    --no-override-colors)                 OVERRIDE_COLORS_ARG="false" ;;
+    *)                                    POSITIONAL_ARGS+=("$arg") ;;
+  esac
+done
+set -- "${POSITIONAL_ARGS[@]+"${POSITIONAL_ARGS[@]}"}"
+
+resolve_override_colors() {
+  echo "${OVERRIDE_COLORS_ARG:-$(current_override_colors)}"
+}
+
+resolve_override_shapes() {
+  echo "${OVERRIDE_SHAPES_ARG:-$(current_override_shapes)}"
+}
+
+parse_bool_toggle() {
+  local val="${1:-}"
+  local cur="$2"
+  case "$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" in
+    on|true|yes|1)  echo "true" ;;
+    off|false|no|0) echo "false" ;;
+    ""|toggle)
+      if [[ "$cur" == "true" ]]; then echo "false"; else echo "true"; fi
+      ;;
+    *)
+      echo "Error: expected 'on' or 'off' (got '$val')" >&2
+      exit 1
+      ;;
+  esac
+}
+
 if [[ $# -eq 0 ]]; then
   if [[ -t 0 && -t 1 ]]; then
     launch_picker
@@ -494,7 +597,7 @@ case "$cmd" in
     shape="${3:-slash}"
     norm_p="$(normalize_preset "$preset")"
     norm_s="$(normalize_shape "$shape")"
-    write_snippet "$norm_p" "$norm_s"
+    write_snippet "$norm_p" "$norm_s" "$(resolve_override_colors)" "$(resolve_override_shapes)"
     configure_ghostty
     reload_ghostty "$norm_s"
     echo ""
@@ -520,7 +623,7 @@ case "$cmd" in
       shape="${3:-$(current_shape)}"
     fi
     norm_s="$(normalize_shape "${shape:-slash}")"
-    write_snippet "$preset" "$norm_s"
+    write_snippet "$preset" "$norm_s" "$(resolve_override_colors)" "$(resolve_override_shapes)"
     reload_ghostty "$norm_s"
     echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
     ;;
@@ -531,15 +634,39 @@ case "$cmd" in
     fi
     preset="$(current_preset)"
     norm_s="$(normalize_shape "$2")"
-    write_snippet "$preset" "$norm_s"
+    write_snippet "$preset" "$norm_s" "$(resolve_override_colors)" "$(resolve_override_shapes)"
     reload_ghostty "$norm_s"
     echo "Active shape -> $norm_s (effect: $preset) — $(shape_description "$norm_s")"
+    ;;
+  lock-shape|override-shapes)
+    preset="$(current_preset)"
+    norm_s="$(current_shape)"
+    next_val="$(parse_bool_toggle "${2:-}" "$(current_override_shapes)")"
+    write_snippet "$preset" "$norm_s" "$(current_override_colors)" "$next_val"
+    reload_ghostty "$norm_s"
+    if [[ "$next_val" == "true" ]]; then
+      echo "✓ Shape lock ENABLED -> '$norm_s' forced across TUI apps (opencode, nvim)."
+    else
+      echo "✓ Shape lock DISABLED -> TUI apps can switch cursor shape via DECSCUSR."
+    fi
+    ;;
+  override-colors|lock-colors)
+    preset="$(current_preset)"
+    norm_s="$(current_shape)"
+    next_val="$(parse_bool_toggle "${2:-}" "$(current_override_colors)")"
+    write_snippet "$preset" "$norm_s" "$next_val" "$(current_override_shapes)"
+    reload_ghostty "$norm_s"
+    if [[ "$next_val" == "true" ]]; then
+      echo "✓ Color override ENABLED -> Ghostty cursor-color forced over app OSC 12 colors."
+    else
+      echo "✓ Color override DISABLED -> TUI app OSC 12 cursor colors respected."
+    fi
     ;;
   next)
     preset="$(cycle_preset 1)"
     shape="${2:-$(current_shape)}"
     norm_s="$(normalize_shape "${shape:-slash}")"
-    write_snippet "$preset" "$norm_s"
+    write_snippet "$preset" "$norm_s" "$(resolve_override_colors)" "$(resolve_override_shapes)"
     reload_ghostty "$norm_s"
     echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
     ;;
@@ -547,7 +674,7 @@ case "$cmd" in
     preset="$(cycle_preset -1)"
     shape="${2:-$(current_shape)}"
     norm_s="$(normalize_shape "${shape:-slash}")"
-    write_snippet "$preset" "$norm_s"
+    write_snippet "$preset" "$norm_s" "$(resolve_override_colors)" "$(resolve_override_shapes)"
     reload_ghostty "$norm_s"
     echo "Active cursor -> effect: $preset | shape: $norm_s — $(preset_description "$preset")"
     ;;
